@@ -26,7 +26,7 @@ def make_img(img_dir, i, text0, text1, text2):
     d.text((7, 10), text0, font=fnt, fill=colorText)
     d.text((7, 35), text1, font=fnt, fill=colorText)
     d.text((7, 60), text2, font=fnt, fill=colorText)
-    txt.save(img_dir + f"/{i}.png")
+    txt.save(f"{img_dir}/{i}.png")
 
 def make_overlay():
     for i in range(20,31):

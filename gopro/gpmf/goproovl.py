@@ -139,6 +139,7 @@ def create_track(data, last_sec_part):
 #             end_time = data[index + 1]['timestamp']
 #         length_row = len(row['gps_data'])
         gps_data = row['gps_data']
+        print_log(f"gps_data: {gps_data}")
         if len(gps_data) > 0 and gps_data[0]["fix"] > 0:
             gps_datum = row['gps_data'][0]
             if not first_gps_fix_time:
@@ -159,8 +160,12 @@ def create_track(data, last_sec_part):
                 gps_datum['timestamp'] = act_sec
                 gps_datum['diff_sec'] = diff_sec
                 csv_data.append(gps_datum)
-                gps_points.append((gps_datum)),
-    gps_fix_total_seconds = (gps_datum['timestamp'] - first_gps_fix_time).total_seconds()
+                gps_points.append((gps_datum))
+    if not first_gps_fix_time:
+        print_log("nincs gps adat")
+        exit()
+        
+    gps_fix_total_seconds = (row['timestamp'] - first_gps_fix_time).total_seconds()
     print_time(gps_fix_total_seconds, "gps fix")
     gps_fix_diff = duration_sec - gps_fix_total_seconds - last_sec_part
     print_time(gps_fix_diff, "begin - gps fix difference")
@@ -376,9 +381,9 @@ def make_gpx(points, fd):
 	)
 
 
-def print_log(param0):
-    print(param0)
-    log_file.write(param0+"\n")
+def print_log(param):
+    print(param)
+    log_file.write(param+"\n")
 
 
 def concat_ovl_video():
