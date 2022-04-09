@@ -22,7 +22,7 @@ import shutil
 from pathlib import Path
 from subprocess import Popen, PIPE
 from io import BytesIO
-from video import text2img
+import text2img
 
 FFMPEG = "/usr/bin/ffmpeg"
 FFPROBE = "/usr/bin/ffprobe"
@@ -209,7 +209,7 @@ def call_prog(params):
 
 def create_ovl_video(): 
     list_all_images = sorted(Path(img_dir).iterdir())
-    chunk_size = 600
+    chunk_size = 290
     end_sec = duration_sec if end == 0 else end
     rest = end_sec - begin
     beg = begin
@@ -370,7 +370,7 @@ def make_gpx(points, fd):
     )
     for p in points:
         print(
-			f'   <trkpt lat="{p["latitude"]}" lon="{p["longitude"]}"><ele>{p["altitude"]}</ele><time>{p["timestamp"].strftime("%Y-%m-%dT%H:%M:%S.%fZ")}</time><fix>{p["fix"]}</fix><accuracy>{p["accuracy"]}</accuracy><speed>{p["speedmps"]}</speed><speed3d>{p["speed3mps"]}</speed3d></trkpt>',		
+			f'   <trkpt lat="{p["latitude"]}" lon="{p["longitude"]}"><ele>{p["altitude"]}</ele><time>{p["timestamp"].strftime("%Y-%m-%dT%H:%M:%SZ")}</time><fix>{p["fix"]}</fix><accuracy>{p["accuracy"]}</accuracy><speed>{p["speedmps"]}</speed><speed3d>{p["speed3mps"]}</speed3d></trkpt>',		
 			file=fd
 		)
     print("""  </trkseg>

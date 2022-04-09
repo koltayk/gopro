@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageFont  # @UnresolvedImport only for PyDev
 size = (200, 90)
 # base = Image.open('/home/kk/tmp/vlcsnap-2020-05-24-11h36m30s333.png').convert('RGBA')
 
-colorText = (255,255,255,255)
+colorText = (255,0,0,255)
 fontname = 'Roboto-Bold.ttf'
 fontsize = 16   
 Text0 = "25km/h  123°  +2,5m/s"
@@ -30,7 +30,7 @@ def make_img(img_dir, i, text0, text1, text2):
 
 def make_overlay():
     for i in range(20,31):
-        make_img(i, Text0, Text1 + str(i))
+        make_img(i, Text0, Text1, Text2 + str(i))
 #     images.append(txt)
 #txt.show()
 
