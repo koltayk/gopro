@@ -13,7 +13,6 @@ should work on Windows as well with proper path to ffmpeg.
 import argparse
 import datetime
 import pytz
-from tzwhere import tzwhere
 import re
 import math
 import struct
@@ -22,7 +21,9 @@ import shutil
 from pathlib import Path
 from subprocess import Popen, PIPE
 from io import BytesIO
-import text2img
+from tzwhere import tzwhere
+from PIL import Image, ImageDraw, ImageFont  # @UnresolvedImport only for PyDev
+import numpy as np
 
 FFMPEG = "/usr/bin/ffmpeg"
 FFPROBE = "/usr/bin/ffprobe"
@@ -38,7 +39,7 @@ def time_in_sec(min_sec):
     return seconds
 
 
-def dump_metadata(filename):
+def dump_metadata(filename, out_file_base_tmp):
     proc = Popen([FFPROBE, filename],stdout=PIPE,stderr=PIPE, encoding='utf8')
     global duration_sec
     for line in list(proc.stderr):
@@ -47,6 +48,11 @@ def dump_metadata(filename):
         if m:
             duration_sec = time_in_sec(m.group(1))
     print_time(duration_sec, "temp_dir")
+    
+    proc = Popen([FFMPEG, '-i', filename, '-vf', 'fps=1', out_file_base_tmp + '/%04d.bmp'],stdout=PIPE,stderr=PIPE, encoding='utf8')   # frames per second (for calculate text color)
+    for line in list(proc.stderr):
+        print_log(line)
+    
     (o,e) = Popen([FFMPEG, '-y', '-i', filename, '-codec', 'copy', '-map', '0:3', '-f', 'rawvideo','-'],stdout=PIPE,stderr=PIPE).communicate()
     Path(temp_dir + '/' + video_name + '.gpmf').write_bytes(o)
 
@@ -64,9 +70,9 @@ def calc_vertical_speed(step, alt0, alt1):
 
 
 def getDst(gps_time):  
+    global timezone
     time = timezone.fromutc(gps_time)
     return time.strftime("%Y.%m.%d %H:%M:%S")
-
 
 
 def calc_direction_ift(diff_sec, gps_datum_prev, gps_datum_next, text0, text1):
@@ -77,12 +83,11 @@ def calc_direction_ift(diff_sec, gps_datum_prev, gps_datum_next, text0, text1):
     return text0, text1
 
 
-def create_ovl_img(gps_datum_prev, gps_datum, gps_datum_next):
-    time = getDst(gps_datum['timestamp'])
+def create_ovl_img(gps_datum_prev, gps_datum, gps_datum_next, act_sec):
+    time = gps_datum['timestamp']
     if not gps_datum['diff_sec']:
         text0 = ''
         text1 = ''
-        #text2img.make_img(img_dir, time, '', '', time) 
     else:
         speed = 3.6 * gps_datum["speed3mps"]
         heigh = gps_datum["altitude"]
@@ -94,13 +99,13 @@ def create_ovl_img(gps_datum_prev, gps_datum, gps_datum_next):
             text0, text1 = calc_direction_ift(gps_datum['diff_sec'], gps_datum_prev, gps_datum, text0, text1)
         elif gps_datum_next and 'latitude' in gps_datum_next:
             text0, text1 = calc_direction_ift(gps_datum['diff_sec'], gps_datum, gps_datum_next, text0, text1)
-    text2img.make_img(img_dir, time, text0, text1, time)
+    make_img(img_dir, out_file_base_tmp, time, timezone, act_sec, text0, text1)
 
 
 def create_pre_imgs(first_gps_fix_time, gps_diff):
     for i in reversed(range(int(begin), int(round(gps_diff)))):        
-        time = getDst(first_gps_fix_time - datetime.timedelta(seconds=i+1))
-        text2img.make_img(img_dir, time, '', '', time)   
+        time = first_gps_fix_time - datetime.timedelta(seconds=i+1)
+        make_img(img_dir, out_file_base_tmp, time, timezone, i, '', '')   
 
 
 def angle_from_coordinate(lat1, long1, lat2, long2):
@@ -177,7 +182,7 @@ def create_track(data, last_sec_part):
         gps_datum_next = gps_points[i+1] if i+1 < len(gps_points) else None
         act_sec = (gps_datum['timestamp'] - first_gps_fix_time).total_seconds() + gps_fix_diff
         if act_sec > begin and (end == 0 or act_sec <= end):
-            create_ovl_img(gps_datum_prev, gps_datum, gps_datum_next)
+            create_ovl_img(gps_datum_prev, gps_datum, gps_datum_next, round(act_sec))
     
     return csv_data
 
@@ -194,6 +199,21 @@ def chunker(seq, size):
     return list(seq[i:i+size] for i in range(0, len(seq), size))
 
 
+def rotate(file_name):
+    return file_name
+    # ffmpeg -i '/home/kk/Videos/tmp/Antholz/GH060140/part-0.mp4' -map_metadata 0 -metadata:s:v rotate="180" -codec copy '/home/kk/Videos/tmp/Antholz/GH060140/part-0-r.mp4'
+    file_name_rotate = file_name.replace(MP4, 'rotate.'+MP4)
+    params = [FFMPEG, '-i', file_name, '-map_metadata', '0', '-metadata:s:v:0', 'rotate=0', '-c', 'copy', file_name_rotate]
+    rc = call_prog(params)
+
+    print_log(f"Rotating output {file_name} to {file_name_rotate} returncode: {rc}")
+    if rc != 0:
+        exit()
+            
+    return file_name_rotate
+
+
+
 def call_prog(params):
     print_log(str(params))
     process = Popen(params,stdout=PIPE,stderr=PIPE, encoding='utf8')
@@ -208,6 +228,7 @@ def call_prog(params):
 
 
 def create_ovl_video(): 
+    video_file_name_rot = rotate(video_file_name)
     list_all_images = sorted(Path(img_dir).iterdir())
     chunk_size = 290
     end_sec = duration_sec if end == 0 else end
@@ -230,12 +251,13 @@ def create_ovl_video():
     #    ffmpeg -y -i input.mp4 -filter_complex_script "myscript.txt" -c:v libx264 output.mp4
         out_video = temp_dir + "/part-" + str(index) + ".mp4"
         dur = str(min(chunk_size, rest))
-        params = [FFMPEG, '-threads', '16', '-y', '-ss', str(beg), '-t', str(dur), '-i', video_file_name, *list_images, '-filter_complex_script', out_filter, '-pix_fmt', 'yuv420p', '-c:a', 'copy', out_video]
+        params = [FFMPEG, '-threads', '16', '-y', '-ss', str(beg), '-t', str(dur), '-i', video_file_name_rot, *list_images, '-filter_complex_script', out_filter, '-pix_fmt', 'yuv420p', '-c:a', 'copy', out_video]
         rc = call_prog(params)
     
         print_log(f"Writing output temp_dir to {out_video} returncode: {rc}")
         if rc != 0:
             exit()
+            
         videos.append((out_video, dur))
         beg += chunk_size
         rest -= chunk_size
@@ -302,47 +324,51 @@ def gopro_binary_to_csv(gopro_binary):
         else:
             for numvalue in range(num_values):        
                 value = gopro_binary.read(val_size)
-                if "GPS5" in label_string:
-                    countGPS5 += 1
-                    countGPS5_per_GPSU += 1
-                    current_gps_data = {}
-                    if val_size != 20:
-                        raise Exception("Invalid data length for GPS5 data type. Expected 20 got {}.".format(val_size))
-                    latitude, longitude, altitude, speed, speed3d = struct.unpack('>iiiii', value)
-                    if okay_to_record:
-                        current_gps_data["latitude"] = float(latitude) / scales[0]
-                        current_gps_data["longitude"] = float(longitude) / scales[1]
-                        current_gps_data["altitude"] = float(altitude) / scales[2]
-                        current_gps_data["speedmps"] = float(speed) / scales[3]
-                        current_gps_data["speed3mps"] = float(speed3d) / scales[4]
-                        current_gps_data["fix"] = gps_fix
-                        current_gps_data["accuracy"] = gps_accuracy
-                        current_data["gps_data"].append(current_gps_data)
-                elif "GPSU" in label_string:
-                    countGPSU += 1
-                    countGPS5_per_GPSU = 0
-                    # Only append to data if we have some GPS data.
-                    timestamp = datetime.datetime.strptime(value.strip().decode(), '%y%m%d%H%M%S.%f')
-                    current_data = {'timestamp': timestamp, 'gps_data': []}
-                    data.append(current_data)
-                elif "GPSF" in label_string:                    
-                    # GPS Fix. Per https://github.com/gopro/gpmf-parser:
-                    # Within the GPS stream: 0 - no lock, 2 or 3 - 2D or 3D Lock.
-                    gps_fix = int(struct.unpack('>I', value)[0]) 
-                elif 'GPSP' in label_string:                    
-                    # GPS Accuracy. Per https://github.com/gopro/gpmf-parser:
-                    # Within the GPS stream, under 500 is good.
-                    gps_accuracy = int(struct.unpack('>H', value)[0])  
-#                 elif 'STNM' in label_string:                    
-                    # streem name  
-#                     print_log("STNM: " + str(value))                
-                else:
-                    # Just skip on by the data_length, this is a data
-                    # type we don't care about.            
-                    continue
-                # Decide whether we want to record data.
-                okay_to_record = gps_fix in [2, 3] and gps_accuracy < 500
-                
+                try:
+                    if "GPS5" in label_string:
+                        countGPS5 += 1
+                        countGPS5_per_GPSU += 1
+                        current_gps_data = {}
+                        if val_size != 20:
+                            raise Exception("Invalid data length for GPS5 data type. Expected 20 got {}.".format(val_size))
+                        latitude, longitude, altitude, speed, speed3d = struct.unpack('>iiiii', value)
+                        if okay_to_record:
+                            current_gps_data["latitude"] = float(latitude) / scales[0]
+                            current_gps_data["longitude"] = float(longitude) / scales[1]
+                            current_gps_data["altitude"] = float(altitude) / scales[2]
+                            current_gps_data["speedmps"] = float(speed) / scales[3]
+                            current_gps_data["speed3mps"] = float(speed3d) / scales[4]
+                            current_gps_data["fix"] = gps_fix
+                            current_gps_data["accuracy"] = gps_accuracy
+                            current_data["gps_data"].append(current_gps_data)
+                    elif "GPSU" in label_string:
+                        countGPSU += 1
+                        countGPS5_per_GPSU = 0
+                        # Only append to data if we have some GPS data.
+                        timestamp = datetime.datetime.strptime(value.strip().decode(), '%y%m%d%H%M%S.%f')
+                        print_log(f"gopro_binary_to_csv timestamp: {timestamp}")  
+                        current_data = {'timestamp': timestamp, 'gps_data': []}
+                        data.append(current_data)
+                    elif "GPSF" in label_string:                    
+                        # GPS Fix. Per https://github.com/gopro/gpmf-parser:
+                        # Within the GPS stream: 0 - no lock, 2 or 3 - 2D or 3D Lock.
+                        gps_fix = int(struct.unpack('>I', value)[0]) 
+                    elif 'GPSP' in label_string:                    
+                        # GPS Accuracy. Per https://github.com/gopro/gpmf-parser:
+                        # Within the GPS stream, under 500 is good.
+                        gps_accuracy = int(struct.unpack('>H', value)[0])  
+    #                 elif 'STNM' in label_string:                    
+                        # streem name  
+    #                     print_log("STNM: " + str(value))                
+                    else:
+                        # Just skip on by the data_length, this is a data
+                        # type we don't care about.            
+                        continue
+                    # Decide whether we want to record data.
+                    okay_to_record = gps_fix in [2, 3] and gps_accuracy < 500
+                except ValueError as e: 
+                    print_log(f"gopro_binary_to_csv error: {e}")
+                    
         # Data is always packed to four bytes, so skip to the next
         # four byte chunk if we're not currently there.
         mod = data_length % 4
@@ -382,8 +408,9 @@ def make_gpx(points, fd):
 
 
 def print_log(param):
-    print(param)
-    log_file.write(param+"\n")
+    str = param.replace("\n", "")
+    print(str)
+    log_file.write(str+"\n")
 
 
 def concat_ovl_video():
@@ -398,12 +425,60 @@ def concat_ovl_video():
     rc = call_prog(params)
 
 
+def make_img(img_dir, out_file_base_tmp, time, timezone, act_sec, text0, text1):
+    # make a blank image for the text, initialized to transparent text color
+    txt = Image.new('RGBA', ovl_size, (0, 0, 0, 0))
+# get a font
+    fontname = 'Roboto-Bold.ttf'
+    fontsize = 18   
+    fnt = ImageFont.truetype(fontname, fontsize) # get a drawing context
+    d = ImageDraw.Draw(txt)
+# draw text, full opacity
+    time_str = timezone.fromutc(time).strftime("%Y.%m.%d %H:%M:%S")
+    colorText = get_text_color(time, act_sec, out_file_base_tmp)
+    d.text((7, 10), text0, font=fnt, fill=colorText)
+    d.text((7, 35), text1, font=fnt, fill=colorText)
+    d.text((7, 60), time_str, font=fnt, fill=colorText)
+    txt.save(f"{img_dir}/{time_str}.png")
+
+
+def get_text_color (time, act_sec, out_file_base_tmp):
+    act_sec = max(1, act_sec)
+    image_file = f"{out_file_base_tmp}/{act_sec:04d}.bmp"
+    img = Image.open(image_file)
+    
+    img_size = img.size
+    w = img_size[0]
+    h = img_size[1]
+    # print(img_size)    
+    
+    left_down = np.asarray(img)[h-ovl_size[1]:h, 0:ovl_size[0]]
+    # ld_img= Image.fromarray(left_down)
+    # ld_img.show()
+    
+    rgb_result=np.array([0., 0., 0.])
+    for line in left_down:
+        rgb_line=np.array([0., 0., 0.])
+        for rgb in line:
+            rgb_px = np.array(rgb)
+            rgb_line += rgb_px
+        rgb_result += rgb_line / line.shape[0]
+        
+    rgb_result = rgb_result / left_down.shape[0]
+    brightness = rgb_result[0]*0.299 + rgb_result[1]*0.587 + rgb_result[2]*0.114
+    print_log(f"act_sec {act_sec} RGB {rgb_result} brightness {brightness}")
+    if brightness < 128:
+        return (255,255,255,255)
+    else:
+        return (0,0,0,255)
+    
 
 def parseArgs():
     parser = argparse.ArgumentParser()
     parser.add_argument("-b", "--begin", help="begin time", default=0)
     parser.add_argument("-e", "--end", help="end time", default=0)
-    parser.add_argument("dir", help="directory of temp_dir files")
+    parser.add_argument("-o", "--outdir", help="output directory", default='/home/kk/Videos/')
+    parser.add_argument("dir", help="input directory")
     parser.add_argument("outputfile", help="output file")
     args = parser.parse_args()
 
@@ -413,17 +488,23 @@ def parseArgs():
 if __name__ == "__main__":
     args = parseArgs()
     timezone = None
+    out_file_base_tmp = None
     begin = 0  
     end = 0  
     duration_sec = 0
+    ovl_size = (200, 90)
     start = datetime.datetime.now()
     try:
+        
         base_name = args.outputfile
-        out_file_base = args.dir + "/" + base_name
+        out_file_base = args.outdir + args.dir.split("/")[-1] + "/" + base_name
+        out_file_base_tmp = out_file_base + "/tmp"
         if os.path.exists(out_file_base):
             shutil.rmtree(out_file_base) 
-        os.makedirs(out_file_base)
+        # os.makedirs(out_file_base) 
+        os.makedirs(out_file_base_tmp)
         log_file = open(out_file_base + "/log","w")
+        
         # create one list of all points in all of the videos on cmd line
         points = list()
         videos = list()
@@ -450,8 +531,9 @@ if __name__ == "__main__":
             if index+1 == len(file_list) and args.end:
                 end = time_in_sec(args.end)
             else:
-                end = 0                
-            points.extend(gopro_binary_to_csv(dump_metadata(video_file_name)))
+                end = 0              
+            points.extend(gopro_binary_to_csv(dump_metadata(video_file_name, out_file_base_tmp)))
+        print_log(f"begin {args.begin}, end {args.end}")  
         # output a simple gpx
         gpx_file = out_file_base + '/' + base_name + ".gpx"
         with open(gpx_file,"w") as fd:
