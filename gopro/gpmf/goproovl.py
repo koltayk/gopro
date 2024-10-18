@@ -5,7 +5,7 @@ Overlay the videos in dir (input directory) with GPS data (time, high, speed, di
 Based on https://github.com/krisp/gopro2gpx/blob/master/gopro2gpx.py
 Output GPS track from GoPro videos in Garmin GPX format.
 
-Accepts an arbitrary number of input videos in dir (input directory), an outputfile as the base name of the created video
+Accepts an arbitrary number of input videos in dir (input directory), an outputname as the base name of the created video
 The GPS points from multiple videos are concatenated into a single gpx output file.
 
 Adjust the FFMPEG global below if ffmpeg is in a non-standard location. This
@@ -14,6 +14,7 @@ should work on Windows as well with proper path to ffmpeg.
 
 import argparse
 import datetime
+import glob
 from io import BytesIO
 import math
 import os
@@ -24,6 +25,7 @@ import struct
 from subprocess import Popen, PIPE
 
 from PIL import Image, ImageDraw, ImageFont  # @UnresolvedImport only for PyDev
+from google.protobuf import duration_pb2
 import pytz
 from tzwhere import tzwhere  # https://github.com/pegler/pytzwhere/issues/53
 
@@ -33,6 +35,7 @@ FFMPEG = "/usr/bin/ffmpeg"
 FFPROBE = "/usr/bin/ffprobe"
 GPSFREQU = 18
 MP4 = 'MP4'
+PNG = '.png'
 
 
 def time_in_sec(min_sec):
@@ -43,7 +46,7 @@ def time_in_sec(min_sec):
     return seconds
 
 
-def dump_metadata(filename, out_file_text_corner_tmp):
+def dump_metadata(filename):
     proc = Popen([FFPROBE, filename], stdout = PIPE, stderr = PIPE, encoding = 'utf8')
     global duration_sec
     global ovl_pos_y
@@ -54,7 +57,10 @@ def dump_metadata(filename, out_file_text_corner_tmp):
             duration_sec = time_in_sec(m.group(1))
         m = re.match(".*Stream #0:0.*, \d+x(\d+) .*", line)
         if m:
-            ovl_pos_y = int(m.group(1)) - 90
+            if args.upovl:
+                ovl_pos_y = 0
+            else:
+                ovl_pos_y = int(m.group(1)) - ovl_size[1]
     print_time(duration_sec, "temp_dir")
 
     proc = Popen([FFMPEG, '-i', filename, '-vf', 'fps=1', out_file_text_corner_tmp + '/%04d.bmp'], stdout = PIPE, stderr = PIPE, encoding = 'utf8')  # frames per second (for calculate text color)
@@ -106,13 +112,13 @@ def create_ovl_img(gps_datum_prev, gps_datum, gps_datum_next, act_sec):
             text0, text1 = calc_direction_ift(gps_datum['diff_sec'], gps_datum_prev, gps_datum, text0, text1)
         elif gps_datum_next and 'latitude' in gps_datum_next:
             text0, text1 = calc_direction_ift(gps_datum['diff_sec'], gps_datum, gps_datum_next, text0, text1)
-    make_img(img_dir, out_file_text_corner_tmp, time, act_sec, text0, text1)
+    make_img(time, act_sec, text0, text1)
 
 
 def create_pre_imgs(first_gps_fix_time, gps_diff):
-    for i in reversed(range(int(begin), int(round(gps_diff)))):
+    for i in range(int(round(gps_diff - begin))):
         time = first_gps_fix_time - datetime.timedelta(seconds = i + 1)
-        make_img(img_dir, out_file_text_corner_tmp, time, i, '', '')
+        make_img(time, i, '', '')
 
 
 def angle_from_coordinate(lat1, long1, lat2, long2):
@@ -131,6 +137,7 @@ def angle_from_coordinate(lat1, long1, lat2, long2):
 
 
 def create_track(data, last_sec_part):
+    global timezone
     csv_data = []
     first_gps_fix_time = None
     act_sec = None
@@ -156,28 +163,32 @@ def create_track(data, last_sec_part):
             gps_datum = gps_data[0]
             if gps_datum["fix"] > 0 and not (gps_datum["latitude"] == 0 and gps_datum["longitude"] == 0):
                 if not first_gps_fix_time:
-                    first_gps_fix_time = row['timestamp']
-                    act_sec = first_gps_fix_time.replace(microsecond = 0) - datetime.timedelta(seconds = 1)
                     timezone_str = tzwhere.tzwhere().tzNameAt(gps_datum["latitude"], gps_datum["longitude"])
-                    timezone = pytz.timezone(timezone_str)
-                diff_sec = (row['timestamp'] - act_sec).total_seconds()
-                if diff_sec >= 1:
-                    for i in range(1, int(diff_sec)):  # gap without gps fix
-                        act_sec += datetime.timedelta(seconds = 1)
-                        gps_datum_temp = {}
-                        gps_datum_temp['timestamp'] = act_sec
-                        gps_datum_temp['diff_sec'] = None
-                        gps_points.append((gps_datum_temp))
-                    act_sec = row['timestamp'].replace(microsecond = 0)
-                    gps_datum['timestamp'] = act_sec
-                    gps_datum['diff_sec'] = diff_sec
-                    csv_data.append(gps_datum)
-                    gps_points.append((gps_datum))
+                    if timezone_str:
+                        timezone = pytz.timezone(timezone_str)
+                        first_gps_fix_time = row['timestamp']
+                        act_sec = first_gps_fix_time.replace(microsecond = 0) - datetime.timedelta(seconds = 1)
+                if act_sec:
+                    diff_sec = (row['timestamp'] - act_sec).total_seconds()
+                    if diff_sec >= 1:
+                        for i in range(1, int(diff_sec)):  # gap without gps fix
+                            act_sec += datetime.timedelta(seconds = 1)
+                            gps_datum_temp = {}
+                            gps_datum_temp['timestamp'] = act_sec
+                            gps_datum_temp['diff_sec'] = None
+                            gps_points.append((gps_datum_temp))
+                        act_sec = row['timestamp'].replace(microsecond = 0)
+                        gps_datum['timestamp'] = act_sec
+                        gps_datum['diff_sec'] = diff_sec
+                        csv_data.append(gps_datum)
+                        gps_points.append((gps_datum))
 
     if first_gps_fix_time:
         gps_fix_total_seconds = (row['timestamp'] - first_gps_fix_time).total_seconds()
         print_time(gps_fix_total_seconds, "gps fix")
         gps_fix_diff = duration_sec - gps_fix_total_seconds - last_sec_part
+        if gps_fix_diff < 0:
+            gps_fix_diff = 0
         print_time(gps_fix_diff, "begin - gps fix difference")
         create_pre_imgs(first_gps_fix_time, gps_fix_diff)
 
@@ -185,8 +196,10 @@ def create_track(data, last_sec_part):
             gps_datum_prev = gps_points[i - 1] if i > 0 else None
             gps_datum_next = gps_points[i + 1] if i + 1 < len(gps_points) else None
             act_sec = (gps_datum['timestamp'] - first_gps_fix_time).total_seconds() + gps_fix_diff
+            if act_sec > math.floor(duration_sec):
+                act_sec -= 1
             if act_sec > begin and (end == 0 or act_sec <= end):
-                create_ovl_img(gps_datum_prev, gps_datum, gps_datum_next, round(act_sec))
+                create_ovl_img(gps_datum_prev, gps_datum, gps_datum_next, math.floor(act_sec) + 1)
     else:
         print_log("nincs gps adat")
         create_pre_imgs(row['timestamp'], duration_sec)
@@ -237,8 +250,18 @@ def call_prog(params):
 
 
 def create_ovl_video():
+    global base_name_time_part
     video_file_name_rot = rotate(video_file_name)
     list_all_images = sorted(Path(img_dir).iterdir())
+    base_name_time_part_file = f'{out_file_base_tmp}/base_name_time_part'
+    if not base_name_time_part:
+        if os.path.exists(base_name_time_part_file):
+            with open(base_name_time_part_file, "r") as bnfd:
+                base_name_time_part = bnfd.readline().replace('\n', '')
+        else:
+            base_name_time_part = list_all_images[0].name.replace(PNG, "")
+            with open(base_name_time_part_file, "w") as bnfd:
+                bnfd.write(base_name_time_part)
     chunk_size = 290
     end_sec = duration_sec if end == 0 else end
     rest = end_sec - begin
@@ -258,16 +281,24 @@ def create_ovl_video():
             print('[0:v]' + m.group(1), file = fd)
 
     #    ffmpeg -y -i input.mp4 -filter_complex_script "myscript.txt" -c:v libx264 output.mp4
-        out_video = temp_dir + "/part-" + str(index) + ".mp4"
+        # out_video_name = f'{temp_dir}/part-{str(index)}'
+        out_video_part_mp4 = f'{out_file_base_tmp}/part.mp4'
         dur = str(min(chunk_size, rest))
-        params = [FFMPEG, '-threads', '16', '-y', '-ss', str(beg), '-t', str(dur), '-i', video_file_name_rot, *list_images, '-filter_complex_script', out_filter, '-pix_fmt', 'yuv420p', '-c:a', 'copy', out_video]
+        params = [FFMPEG, '-threads', '16', '-y', '-ss', str(beg), '-t', str(dur), '-i', video_file_name_rot, *list_images, '-filter_complex_script', out_filter, '-pix_fmt', 'yuv420p', '-c:a', 'copy', out_video_part_mp4]
         rc = call_prog(params)
-
-        print_log(f"Writing output temp_dir to {out_video} returncode: {rc}")
+        print_log(f"Writing output temp_dir to {out_video_part_mp4} returncode: {rc}")
         if rc != 0:
             exit()
-
-        videos.append((out_video, dur))
+        out_video_part = f'{temp_dir}/part-{str(index)}.ts'
+        params = [FFMPEG, '-threads', '16', '-y', '-i', out_video_part_mp4, '-c', 'copy', out_video_part]
+        rc = call_prog(params)
+        print_log(f"Writing output temp_dir to {out_video_part} returncode: {rc}")
+        if rc != 0:
+            exit()
+        # with open(f'{out_video_name}.txt', "w") as text_file:
+        #     print(out_video_part, file = text_file)
+        #     print(dur, file = text_file)
+        video_parts.append(out_video_part)
         beg += chunk_size
         rest -= chunk_size
 
@@ -422,24 +453,26 @@ def make_gpx(points, fd):
 
 
 def print_log(param):
-    str = param.replace("\n", "")
-    print(str)
-    print(str, file = lfd)
+    string = str(datetime.datetime.now()) + " " + param.replace("\n", "")
+    print(string)
+    print(string, file = lfd, flush = True)
 
 
 def concat_ovl_video():
-    video_file_list = out_file_base + "/files"
-    with open(video_file_list, "w") as fd:
-        for file, dur in videos:
-            print(f"file '{file}'", file = fd)
-            print(f"duration {dur}", file = fd)
-    print_log(f"Writing video parts list to {video_file_list}")
-    result_video = f'{out_file_base}/{points[0]["timestamp"].strftime("%Y.%m.%d_%H-%M-%S")}_{base_name}.mp4'
-    params = [FFMPEG, '-threads', '16', '-y', '-safe', '0', '-f', 'concat', '-segment_time_metadata', '1', '-i', video_file_list, '-vf', 'select=concatdec_select', '-af', 'aselect=concatdec_select,aresample=async=1', result_video]
+    # video_file_list = out_file_base + "/files"
+    # with open(video_file_list, "w") as fd:
+    #     for file, dur in video_parts:
+    #         print(f"file '{file}'", file = fd)
+    #         print(f"duration {dur}", file = fd)
+    # print_log(f"Writing video parts list to {video_file_list}")
+    concat_file_list = "concat:" + "|".join(video_parts)
+    result_video = f'{out_file_base}/{base_name}.mp4'
+    # params = [FFMPEG, '-threads', '16', '-y', '-safe', '0', '-f', 'concat', '-segment_time_metadata', '1', '-i', video_file_list, '-vf', 'select=concatdec_select', '-af', 'aselect=concatdec_select,aresample=async=1', result_video]
+    params = [FFMPEG, '-threads', '16', '-y', '-i', concat_file_list, '-c', 'copy', result_video]
     rc = call_prog(params)
 
 
-def make_img(img_dir, out_file_text_corner_tmp, time, act_sec, text0, text1):
+def make_img(time, act_sec, text0, text1):
     # make a blank image for the text, initialized to transparent text color
     txt = Image.new('RGBA', ovl_size, (0, 0, 0, 0))
 # get a font
@@ -452,27 +485,44 @@ def make_img(img_dir, out_file_text_corner_tmp, time, act_sec, text0, text1):
         time_str = timezone.fromutc(time).strftime("%Y.%m.%d %H:%M:%S")
     else:
         time_str = time.strftime("%Y.%m.%d %H:%M:%S")
-    colorText = get_text_color(time, act_sec, out_file_text_corner_tmp)
-    d.text((7, 10), text0, font = fnt, fill = colorText)
-    d.text((7, 35), text1, font = fnt, fill = colorText)
-    d.text((7, 60), time_str, font = fnt, fill = colorText)
-    txt.save(f"{img_dir}/{time_str}.png")
+    colorText = get_text_color(act_sec)
+    if args.upovl:
+        line1 = time_str
+        line2 = text0
+        line3 = text1
+    else:
+        line1 = text0
+        line2 = text1
+        line3 = time_str
+
+    d.text((7, 10), line1, font = fnt, fill = colorText)
+    d.text((7, 35), line2, font = fnt, fill = colorText)
+    d.text((7, 60), line3, font = fnt, fill = colorText)
+    txt.save(f"{img_dir}/{time_str}{PNG}")
 
 
-def get_text_color (time, act_sec, out_file_text_corner_tmp):
+def get_text_color (act_sec):
     act_sec = max(1, act_sec)
     image_file = f"{out_file_text_corner_tmp}/{act_sec:04d}.bmp"
     img = Image.open(image_file)
 
     img_size = img.size
-    w = img_size[0]
-    h = img_size[1]
+    w_img = img_size[0]
+    h_img = img_size[1]
+    w_ovl = ovl_size[0]
+    h_ovl = ovl_size[1]
     # print(img_size)
 
-    if args.rotate:
-        text_corner = np.asarray(img)[0:ovl_size[1], w - ovl_size[0]:w]
+    if args.upovl:
+        if args.rotate:
+            text_corner = np.asarray(img)[h_img - h_ovl:h_img, w_img - w_ovl:w_img]
+        else:
+            text_corner = np.asarray(img)[0:h_ovl, 0:w_ovl]
     else:
-        text_corner = np.asarray(img)[h - ovl_size[1]:h, 0:ovl_size[0]]
+        if args.rotate:
+            text_corner = np.asarray(img)[0:h_ovl, w_img - w_ovl:w_img]
+        else:
+            text_corner = np.asarray(img)[h_img - h_ovl:h_img, 0:w_ovl]
     # ld_img= Image.fromarray(text_corner)
     # ld_img.show()
 
@@ -485,12 +535,22 @@ def get_text_color (time, act_sec, out_file_text_corner_tmp):
         rgb_result += rgb_line / line.shape[0]
 
     rgb_result = rgb_result / text_corner.shape[0]
-    brightness = rgb_result[0] * 0.299 + rgb_result[1] * 0.587 + rgb_result[2] * 0.114
-    print_log(f"act_sec {act_sec} RGB {rgb_result} brightness {brightness}")
-    if brightness < 128:
+    brightness0 = rgb_result[0] * 0.299 + rgb_result[1] * 0.587 + rgb_result[2] * 0.114
+    brightness = inv_gam_sRGB(rgb_result[0]) * 0.2126 + inv_gam_sRGB(rgb_result[1]) * 0.7152 + inv_gam_sRGB(rgb_result[2]) * 0.0722
+    # brightness = math.sqrt(.299 * rgb_result[0] * rgb_result[0] + .587 * rgb_result[1] * rgb_result[1] + .114 * rgb_result[2] * rgb_result[2])
+    print_log(f"act_sec {act_sec} RGB {rgb_result} brightness {brightness} brightness0 {brightness0}")
+    if brightness < 0.22:
         return (255, 255, 255, 255)
     else:
         return (0, 0, 0, 255)
+
+
+def inv_gam_sRGB(color):
+    colorChannel = color / 255
+    if colorChannel <= 0.04045:
+            return colorChannel / 12.92
+    else:
+            return math.pow(((colorChannel + 0.055) / 1.055), 2.4)
 
 
 def parseArgs():
@@ -498,9 +558,11 @@ def parseArgs():
     parser.add_argument("-b", "--begin", help = "begin time in first video, mm:ss", default = 0)
     parser.add_argument("-e", "--end", help = "end time in last video, mm:ss", default = 0)
     parser.add_argument("-r", "--rotate", help = "rotate 180°, boolean", default = False)
-    parser.add_argument("-o", "--outdir", help = "output directory", default = '/home/kk/Videos/')
+    parser.add_argument("-u", "--upovl", help = "overlay left up°, boolean", default = False)
+    # parser.add_argument("-o", "--outdir", help = "output directory", default = '/home/kk/Videos/')
+    parser.add_argument("-o", "--outdir", help = "output directory", default = '/run/media/kk/CrucialX9/Videos/')
     parser.add_argument("dir", help = "input directory")
-    parser.add_argument("outputfile", help = "output file")
+    parser.add_argument("outputname", help = "output name")
     args = parser.parse_args()
 
     return args
@@ -510,6 +572,7 @@ if __name__ == "__main__":
     args = parseArgs()
     timezone = None
     out_file_base_tmp = None
+    base_name_time_part = None
     begin = 0
     end = 0
     duration_sec = 0
@@ -518,35 +581,58 @@ if __name__ == "__main__":
     # ovl_pos_y = 1430
     ovl_size = (200, 90)
     start = datetime.datetime.now()
-    base_name = args.outputfile
-    out_file_base = args.outdir + args.dir.split("/")[-1] + "/" + base_name
+    out_file_base = f'{args.outdir}pgovl/{args.dir.split("/")[-1]}/{args.outputname}'
     log_file = out_file_base + "/log"
     out_file_base_tmp = out_file_base + "/tmp"
+    tmp_video_dirs = out_file_base_tmp + '/video_dirs/'
+    os.makedirs(tmp_video_dirs, exist_ok = True)
     out_file_text_corner_tmp = out_file_base_tmp + '/tc'
-    if os.path.exists(out_file_base):
-        shutil.rmtree(out_file_base)
-    os.makedirs(out_file_text_corner_tmp)
-
-    with open(log_file, "w") as lfd:
+    with open(log_file, "w+") as lfd:
         print_log(f"begin {args.begin}, end {args.end}")
+        inp_video_files_all = sorted(Path(args.dir).iterdir())
+        inp_video_files = None
+        video_parts = list()
+        if os.path.exists(out_file_base):
+            tmp_dirs = sorted(Path(tmp_video_dirs).iterdir())
+            tmp_dirs_ready = tmp_dirs[:len(tmp_dirs) - 1]
+            if len(tmp_dirs_ready) > 0:
+                inp_video_files_processed = inp_video_files_all[:len(tmp_dirs_ready)]
+                for file in inp_video_files_processed:
+                    print_log(f"file already processed {str(file)}")
+                for tmp_dir in tmp_dirs_ready:
+                    dur_files = glob.glob(f'{tmp_dir}/*.ts')
+                    for dur_file in sorted(dur_files):
+                        # part_name = str(out_video).split(".")[0]
+                        # dur_file_text = Path(dur_file).read_text().split("\n")
+                        # print_log(f"{str(dur_file_text)}")
+                        # video_parts.append((dur_file_text[0], dur_file_text[1]))
+                        video_parts.append(dur_file)
+
+                inp_video_files = inp_video_files_all[len(tmp_dirs_ready):]
+                shutil.rmtree(tmp_dirs[-1])
+                args.begin = 0
+            else:
+                shutil.rmtree(out_file_base_tmp)
+        os.makedirs(out_file_text_corner_tmp, exist_ok = True)
 
         # create one list of all points in all of the videos on cmd line
         points = list()
-        videos = list()
         file_list = list()
         p = re.compile(args.dir + '/(.*)' + "\." + MP4 + '$')
         # p = re.compile(args.dir + '/(GH.*)' + "\." + MP4 + '$')
-        for file in sorted(Path(args.dir).iterdir()):
-            print_log(f"\nfile {file}")
+        if not inp_video_files:
+            inp_video_files = inp_video_files_all
+        for file in inp_video_files:
+            print_log(f"inp_video_file {file}")
             video_file_name = str(file)
             m = p.match(video_file_name)
             if  m:
                 file_list.append(m.group(1))
 
         for index, video_name in enumerate(file_list):
-            video_file_name = args.dir + '/' + video_name + "." + MP4
+            video_file_name = f'{args.dir}/{video_name}.{MP4}'
             print_log(f"Processing {video_file_name}")
-            temp_dir = out_file_base_tmp + '/' + video_name
+            temp_dir = tmp_video_dirs + video_name
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
             img_dir = temp_dir + "/images"
@@ -559,17 +645,22 @@ if __name__ == "__main__":
                 end = time_in_sec(args.end)
             else:
                 end = 0
-            points.extend(gopro_binary_to_csv(dump_metadata(video_file_name, out_file_text_corner_tmp)))
+            points.extend(gopro_binary_to_csv(dump_metadata(video_file_name)))
         # output a simple gpx
         if points:
-            gpx_file = out_file_base + '/' + base_name + ".gpx"
-            with open(gpx_file, "w") as fd:
+            gpx_file = f'{out_file_base}/{args.outputname}.gpx'
+            with open(gpx_file, "w+") as fd:
                 print_log(f"Writing output gpx to {gpx_file}")
                 make_gpx(points, fd)
 
-        concat_ovl_video()
+            base_name = f'{base_name_time_part}_{args.outputname}'
+            concat_ovl_video()
+            new_dir = f'{args.outdir}ovl/{base_name}'
+            shutil.move(out_file_base, new_dir)
+            shutil.move(f'{new_dir}/log', f'{new_dir}/{base_name}.log')
+            shutil.move(f'{new_dir}/{args.outputname}.gpx', f'{new_dir}/{base_name}.gpx')
 
-        shutil.rmtree(out_file_base_tmp)
+        shutil.rmtree(f'{new_dir}/tmp')
         dur = datetime.datetime.now()
         process_duration = (dur - start).total_seconds()
         print_time(process_duration, "process")
