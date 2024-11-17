@@ -7,9 +7,9 @@ import glob
 import os
 from subprocess import Popen, PIPE
 
-root_dir = '/run/media/kk/9C33-6BBD/DCIM/100GOPRO/'
 root_dir = '/run/media/kk/CrucialX9/Videos/GOPRO8/100GOPRO/'
-link_dir = '/home/kk/Videos/'
+root_dir = '/run/media/kk/9C33-6BBD/DCIM/100GOPRO/'
+link_dir = '/home/kk/Videos/GOPRO/'
 for file_path in glob.iglob(root_dir + 'GH01*.MP4'):
     video_num = file_path[-8:-4]
     print(video_num)
@@ -19,7 +19,7 @@ for file_path in glob.iglob(root_dir + 'GH01*.MP4'):
         # print(filename)
         proc = Popen(['ln', '-s', filename, img_dir], stdout = PIPE, stderr = PIPE, encoding = 'utf8')  # symbolic link
         for line in list(proc.stderr):
-            print_log(line)
+            print(line)
     # find_gpx_track(file_path)
 
 print("kész")

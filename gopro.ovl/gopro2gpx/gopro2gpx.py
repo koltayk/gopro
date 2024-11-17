@@ -111,8 +111,11 @@ def BuildGPSPoints(data, skip = False, skipDop = False, dopLimit = 2000):
                 retdata = [ float(x) / float(y) for x, y in zip(item._asdict().values() , list(SCAL)) ]
 
                 gpsdata = fourCC.GPSData._make(retdata)
-                p = gpshelper.GPSPoint(gpsdata.lat, gpsdata.lon, gpsdata.alt, GPSU + datetime.timedelta(seconds = sample_count * t_delta), gpsdata.speed, TMPC)
-                points.append(p)
+                p = gpshelper.GPSPoint(gpsdata.lat, gpsdata.lon, gpsdata.alt, GPSU + datetime.timedelta(seconds = sample_count * t_delta), gpsdata.speed, TMPC, GPSP)
+                if points and p.time < points[-1].time:
+                    print(f"Warning: p.time < points[-1].time {p.time} < {points[-1].time}  len(points): {len(points)}")
+                else:
+                    points.append(p)
                 stats['ok'] += 1
                 sample_count += 1
 

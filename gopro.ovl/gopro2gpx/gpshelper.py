@@ -13,7 +13,7 @@ import time
 
 class GPSPoint:
 
-    def __init__(self, latitude = 0.0, longitude = 0.0, elevation = 0.0, time = datetime.fromtimestamp(time.time()), speed = 0.0, temperature = 0.0):
+    def __init__(self, latitude = 0.0, longitude = 0.0, elevation = 0.0, time = datetime.fromtimestamp(time.time()), speed = 0.0, temperature = 0.0, dop = 9999):
         self.latitude = latitude
         self.longitude = longitude
         self.elevation = elevation
@@ -24,6 +24,7 @@ class GPSPoint:
         self.cad = 0
         self.cadence = 0
         self.temperature = temperature
+        self.dop = dop
         self.atemp = 0
         self.power = 0
         self.distance = 0
@@ -109,26 +110,21 @@ def generate_GPX(points, start_time = None, trk_name = "exercise"):
     #  </trkpt>
 
     for p in points:
-        hr = p.hr
-        cadence = p.cad
-        speed = p.speed
-        distance = p.distance
-        temperature = p.temperature
-
-        pts = '	<trkpt lat="%s" lon="%s">\r\n' % (p.latitude, p.longitude)
-        pts += '		<ele>%s</ele>\r\n' % p.elevation
-        pts += '		<time>%s</time>\r\n' % UTCTime(p.time)
-        pts += '		<extensions>\r\n'
-        pts += '		    <gpxtpx:TrackPointExtension>\r\n'
-        pts += '		        <gpxtpx:hr>%s</gpxtpx:hr>\r\n' % hr
-        pts += '		        <gpxtpx:cad>%s</gpxtpx:cad>\r\n' % cadence
-        pts += '		        <gpxtpx:speed>%s</gpxtpx:speed>\r\n' % speed
-        pts += '		        <gpxtpx:distance>%s</gpxtpx:distance>\r\n' % distance
+        pts = f'	<trkpt lat="{p.latitude}" lon="{p.longitude}">\r\n'
+        pts += f'		<ele>{p.elevation}</ele>\r\n'
+        pts += f'		<time>{UTCTime(p.time)}</time>\r\n'
+        pts += f'		<extensions>\r\n'
+        pts += f'           <gpxtpx:temp>{p.temperature}</temp>\r\n'
+        pts += f'           <gpxtpx:dop>{p.dop}</dop>\r\n'
+        pts += f'		    <gpxtpx:TrackPointExtension>\r\n'
+        pts += f'		        <gpxtpx:hr>{p.hr}</gpxtpx:hr>\r\n'
+        pts += f'		        <gpxtpx:cad>{p.cad}</gpxtpx:cad>\r\n'
+        pts += f'		        <gpxtpx:speed>{p.speed}</gpxtpx:speed>\r\n'
+        pts += f'		        <gpxtpx:distance>{p.distance}</gpxtpx:distance>\r\n'
         pts += '            </gpxtpx:TrackPointExtension>\r\n'
-    	# pts += '        <power>%s</power>\r\n' % power
-        pts += '            <gpxtpx:temp>%s</temp>\r\n' % temperature
-        pts += '		</extensions>\r\n'
-        pts += '	</trkpt>\r\n'
+    	# pts += '        <power>{power}</power>\r\n'
+        pts += f'		</extensions>\r\n'
+        pts += f'	</trkpt>\r\n'
 
         xml += pts
 
