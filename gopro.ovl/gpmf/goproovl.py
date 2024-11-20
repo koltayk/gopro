@@ -72,29 +72,34 @@ def time_in_sec(min_sec):
 def dump_metadata():
     global duration_sec
     global ovl_pos_y
+    global width
     params = [FFPROBE, '-i', concat_file, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', '-hide_banner']
+    print_log(" ".join(params))
     (o, e) = Popen(params, stdout = PIPE, stderr = PIPE).communicate()
+    print_log(f"Read metadata from {concat_file}")
     metadata = json.loads(o)
     duration_sec = float(metadata['format']['duration'])
     print(f"Length of file is: {duration_sec} sec")
+    width = metadata['streams'][0]['width']
+    height = metadata['streams'][0]['height']
     if args.upovl:
         ovl_pos_y = 0
         if args.rotate:
-            img_pos_x = metadata['streams'][0]['width'] - ovl_size[0]
-            img_pos_y = metadata['streams'][0]['height'] - ovl_size[1]
+            img_pos_x = width - ovl_size[0]
+            img_pos_y = height - ovl_size[1]
         else:
             img_pos_x = 0
             img_pos_y = 0
     else:
-        ovl_pos_y = metadata['streams'][0]['height'] - ovl_size[1]
+        ovl_pos_y = height - ovl_size[1]
         if args.rotate:
-            img_pos_x = metadata['streams'][0]['width'] - ovl_size[0]
+            img_pos_x = width - ovl_size[0]
             img_pos_y = 0
         else:
             img_pos_x = 0
-            img_pos_y = metadata['streams'][0]['height'] - ovl_size[1]
+            img_pos_y = height - ovl_size[1]
 
-    params = [FFMPEG, '-threads', '16', '-i', concat_file, '-vf', f'fps=1,crop={ovl_size[0]}:{ovl_size[1]}:{img_pos_x}:{img_pos_y}', text_corner_dir + '/%04d.bmp', '-hide_banner']
+    params = [FFMPEG, '-threads', '16', '-i', concat_file, '-vf', f'fps=1,crop={ovl_size[0]}:{ovl_size[1]}:{img_pos_x}:{img_pos_y}', text_corner_dir + '/%04d.png', '-hide_banner']
     rc = call_prog(params)
     print_log(f"Read frames pro second from {concat_file} to {text_corner_dir} returncode: {rc}")
     if rc != 0:
@@ -107,12 +112,6 @@ def dump_metadata():
     print_log(f"Read gpmf data from {concat_file}")
     return o
     # return BytesIO(o)
-
-
-def print_time(total_seconds, text):
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    print_log(f"{text} duration: {total_seconds:2.2f} sec:   {hours:.0f} h {minutes:.0f} m {seconds:2.2f} s")
 
 
 def calc_vertical_speed(step, alt0, alt1):
@@ -156,6 +155,7 @@ def create_subtitle_text(gps_points, start_time, act_sec, sfd):
     ts1 = datetime.timedelta(seconds = act_sec + 1)
     if args.upovl:
         line_nr = '1t'
+        # print(f'Dialogue: 0,{ts0}.00,{ts1}.00.00,{colorText}{line_nr},,0000,0000,0000,,{time_str}\\n{text0}\\n{text1}', file = sfd)
         print(f'Dialogue: 0,{ts0}.00,{ts1}.00.00,{colorText}{line_nr},,0000,0000,0000,,{time_str}', file = sfd)
         if text0:
             line_nr = '2t'
@@ -175,16 +175,27 @@ def create_subtitle_text(gps_points, start_time, act_sec, sfd):
 def angle_from_coordinate(lat1, long1, lat2, long2):
     dLon = (long2 - long1)
 
-    y = math.sin(dLon) * math.cos(lat2)
-    x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dLon)
+    y = math.sin(math.radians(dLon)) * math.cos(math.radians(lat2))
+    x = math.cos(math.radians(lat1)) * math.sin(math.radians(lat2)) - math.sin(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.cos(math.radians(dLon))
 
     brng = math.atan2(y, x)
 
     brng = math.degrees(brng)
     brng = (brng + 360) % 360
-    brng = 360 - brng  # count degrees clockwise - remove to make counter-clockwise
 
     return brng
+
+
+def create_list_images(chunk):
+    params = list()
+    for img in chunk:
+        params.append('-i')
+        params.append(str(img))
+    return params
+
+
+def chunker(seq, size):
+    return list(seq[i:i + size] for i in range(0, len(seq), size))
 
 
 def rotate(file_name):
@@ -233,12 +244,13 @@ def add_subtitles(points, start_time):
         for act_sec in range(len(gps_points)):
             create_subtitle_text(gps_points, start_time, act_sec, sfd)
 
-    out_video_part = f'{out_file_base}/{base_name}.{MP4}'
-    params = [FFMPEG, '-threads', '16', '-y', '-i', concat_file, '-vf', f'ass={subtitle_file}', '-preset', 'veryfast', out_video_part, '-hide_banner']
+    subtitle_video = f'{out_file_base}/{base_name}.{MP4}'
+    params = [FFMPEG, '-threads', '16', '-y', '-i', concat_file, '-i', subtitle_file, '-map', '0', '-map', '1', '-c', 'copy', '-c:s', 'mov_text', '-metadata:s:s:0', 'language=eng', subtitle_video, '-hide_banner']
     rc = call_prog(params)
-    print_log(f"Writing subtitles to {out_video_part} returncode: {rc}")
+    print_log(f"Writing subtitles to {subtitle_video} returncode: {rc}")
     if rc != 0:
         exit()
+    return subtitle_video, gps_points
 
 
 def get_nearest_gps_datum(points, p_index, curr_time_rounded):
@@ -246,10 +258,45 @@ def get_nearest_gps_datum(points, p_index, curr_time_rounded):
     dist_sec_curr = dist_sec_last
     while dist_sec_curr <= dist_sec_last:
         p_index += 1
+        if p_index == len(points):
+            break
         dist_sec_last = dist_sec_curr
         dist_sec_curr = abs((points[p_index].time - curr_time_rounded).total_seconds())
 
     return p_index - 1, dist_sec_last
+
+
+def create_ovl_video(subtitle_video, img_width):
+    list_all_images = sorted(Path(img_dir).iterdir())
+    video_parts_out = list()
+    chunk_size = 720
+    beg = 0
+    chunks = chunker(list_all_images, chunk_size)  # need more than 1 chunks because of ffmpeg/my computer could not handle more streams
+    for index, chunk in enumerate(chunks):
+        list_images = create_list_images(chunk)
+        filter_list = list()
+        for i in range(len(chunk)):
+            filter_list.append(f"[v{i}][{i+1}:v] overlay={width - img_width}:{ovl_pos_y}:enable='between(t,{i},{i+0.99999})'[v{i+1}]")
+        filter_complex = ";\n".join(filter_list)
+        p = re.compile('^\[v0\](.*)\[v\d+\]$', re.DOTALL)  # @UndefinedVariable only for PyDev
+        m = p.match(filter_complex)
+        out_filter = out_file_base_tmp + "/filter"
+        print_log(f"Writing output temp filter to {out_filter}")
+        with open(out_filter, "w") as fd:
+            print('[0:v]' + m.group(1), file = fd)
+
+        out_video_part_mp4 = f'{out_file_base_tmp}/part-{str(index)}.mp4'
+        dur = str(len(chunk))
+        params = [FFMPEG, '-threads', '16', '-y', '-ss', str(beg), '-t', str(dur), '-i', subtitle_video, *list_images, '-filter_complex_script', out_filter, '-pix_fmt', 'yuv420p', '-c:a', 'copy', out_video_part_mp4]
+        rc = call_prog(params)
+        print_log(f"Writing output temp_dir to {out_video_part_mp4} returncode: {rc}")
+        if rc != 0:
+            exit()
+
+        video_parts_out.append(out_video_part_mp4)
+        beg += chunk_size
+
+    concat_video(video_parts_out, f'{out_file_base}/{base_name}_ovl.{MP4}')
 
 
 def print_log(param):
@@ -266,7 +313,7 @@ def concat_video(video_parts, concat_file_result):
             print(f"file '{file}'", file = fd)
             # print(f"duration {dur}", file = fd)
     print_log(f"Writing video parts list to {video_file_list}")
-    params = [FFMPEG, '-threads', '16', '-y', '-safe', '0', '-f', 'concat', '-segment_time_metadata', '1', '-i', video_file_list, '-vf', 'select=concatdec_select', '-af', 'aselect=concatdec_select,aresample=async=1', '-map', '0', concat_file_result, '-hide_banner']
+    params = [FFMPEG, '-threads', '16', '-y', '-safe', '0', '-f', 'concat', '-segment_time_metadata', '1', '-i', video_file_list, '-vf', 'select=concatdec_select', '-af', 'aselect=concatdec_select,aresample=async=1', '-map', '0', '-pix_fmt', 'yuv420p', concat_file_result, '-hide_banner']
     rc = call_prog(params)
     print_log(f"Concatenated to {concat_file_result} returncode: {rc}")
     if rc != 0:
@@ -275,7 +322,7 @@ def concat_video(video_parts, concat_file_result):
 
 
 def get_text_color (act_sec):
-    image_file = f"{text_corner_dir}/{(act_sec+1):04d}.bmp"
+    image_file = f"{text_corner_dir}/{(act_sec+1):04d}.png"
     img = Image.open(image_file)
 
     img_size = img.size
@@ -314,8 +361,7 @@ def inv_gam_sRGB(color):
 
 def cut(begin, end, index, video_file_name):
     video_file_name_rot = rotate(video_file_name)
-    out_video_part = f'{tmp_video_dir_inp}/part-{str(index)}.'
-    out_video_part_ts = f'{out_video_part}ts'
+    out_video_part_ts = f'{tmp_video_dir_inp}/part-{str(index)}.ts'
     beg = str(begin)
     if end == 0:
         end = MAXEND
@@ -326,6 +372,105 @@ def cut(begin, end, index, video_file_name):
     if rc != 0:
         exit()
     return out_video_part_ts
+
+
+def get_local_time(points):
+    timezone = None
+    start_time_local_rounded = None
+    for point in points:
+        if point.dop < 500:
+            break
+    if point.latitude and point.longitude:
+        timezone_str = tzwhere.tzwhere().tzNameAt(point.latitude, point.longitude)
+        if timezone_str:
+            timezone = pytz.timezone(timezone_str)
+    if timezone:
+        local_time = timezone.fromutc(start_time)
+        start_time_local_rounded = datetime.datetime.fromtimestamp(round(local_time.timestamp()))
+    return timezone, start_time_local_rounded
+
+
+def calc_track_img_size(min_lat, max_lat, min_lon, max_lon, max_track_img_size):
+    track_x = (max_lon - min_lon) * math.cos(math.radians(min_lat))
+    track_y = max_lat - min_lat
+    if track_x < track_y:
+        return (round((track_x / track_y) * max_track_img_size), max_track_img_size)
+    else:
+        return (max_track_img_size, round((track_y / track_x) * max_track_img_size))
+
+
+def create_track_point(point, min_lat, max_lat, min_lon, max_lon):
+    lat = (max_lat - point.latitude) / (max_lat - min_lat)
+    lon = (point.longitude - min_lon) / (max_lon - min_lon)
+    return lat, lon
+
+
+def create_elevation_niveau_lines(min_hight, max_hight, elev_img_size, buffer):
+    exp = round(math.log(max_hight - min_hight, 10))
+    step = int(math.pow(10, exp))
+    min = math.floor(min_hight / step)
+    max = math.ceil(max_hight / step)
+    if max - min < 3:
+        step = step / 5
+        min = math.floor(min_hight / step)
+        max = math.ceil(max_hight / step)
+
+    lines = list()
+    for niveau in range(min, max):
+        hight = calc_y(niveau, min_hight, max_hight, step, elev_img_size, buffer)
+        if 0 <= hight <= elev_img_size[1]:
+            line = ([(20, hight), (elev_img_size[0], hight)], hight, str(int(niveau * step)))
+            lines.append(line)
+    return lines
+
+
+def calc_y(hight, min_hight, max_hight, step, elev_img_size, buffer):
+    return buffer + (elev_img_size[1] - 2 * buffer) * (max_hight - hight * step) / (max_hight - min_hight)
+
+
+def add_images(points):
+    elev_img_size = (280, 120)
+    max_track_img_size = 250
+    buffer = 5
+    fontname = 'DejaVuSans.ttf'
+    fontsize = 8
+    fnt = ImageFont.truetype(fontname, fontsize)
+
+    elevation_line = list()
+    min_hight = min(p.elevation for p in points)
+    max_hight = max(p.elevation for p in points)
+    track_line = list()
+    min_lat = min(p.latitude for p in points)
+    max_lat = max(p.latitude for p in points)
+    min_lon = min(p.longitude for p in points)
+    max_lon = max(p.longitude for p in points)
+    track_img_size = calc_track_img_size(min_lat, max_lat, min_lon, max_lon, max_track_img_size)
+    img_size = (elev_img_size[0] + track_img_size[0], max(elev_img_size[1], track_img_size[1]))
+    img_points = list()
+    for act_sec, point in enumerate(points):
+        elevation_point = (buffer + (elev_img_size[0] - 2 * buffer) * act_sec / len(points), buffer + (elev_img_size[1] - 2 * buffer) * (max_hight - point.elevation) / (max_hight - min_hight))
+        elevation_line.append(elevation_point)
+        lat, lon = create_track_point(point, min_lat, max_lat, min_lon, max_lon)
+        track_point = (elev_img_size[0] + buffer + (track_img_size[0] - 2 * buffer) * lon, buffer + (track_img_size[1] - 2 * buffer) * lat)
+        track_line.append(track_point)
+        img_points.append((elevation_point, track_point))
+    lines = create_elevation_niveau_lines(min_hight, max_hight, elev_img_size, buffer)
+    for act_sec, (elevation_point, track_point) in enumerate(img_points):
+        img = Image.new('RGBA', img_size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([(0, 0), elev_img_size], fill = (0, 0, 0, 50), outline = (0, 0, 0, 100), width = 1)
+        for line in lines:
+            draw.line(line[0], fill = (55, 55, 55), width = 1)
+            draw.text((0, line[1] - 5), line[2], font = fnt, fill = (55, 55, 55))
+        draw.line(elevation_line, fill = (255, 255, 0), width = 1)
+        draw.ellipse(((elevation_point[0] - 2, elevation_point[1] - 2), (elevation_point[0] + 2, elevation_point[1] + 2)), fill = (255, 0, 0), width = 4)
+
+        draw.rectangle([(elev_img_size[0], 0), img_size], fill = (0, 0, 0, 50), outline = (0, 0, 0, 100), width = 1)
+        draw.line(track_line, fill = (0, 0, 0), width = 1)
+        draw.ellipse(((track_point[0] - 2, track_point[1] - 2), (track_point[0] + 2, track_point[1] + 2)), fill = (255, 0, 0), width = 4)
+        # img.show()
+        img.save(f"{img_dir}/{(act_sec+1):04d}.png")
+    return img_size[0]
 
 
 def parseArgs():
@@ -351,7 +496,9 @@ if __name__ == "__main__":
     begin = 0
     end = 0
     duration_sec = 0
+    ovl_pos_x = 0
     ovl_pos_y = 0
+    width = 0
     # ovl_pos_y = 2060
     # ovl_pos_y = 1430
     ovl_size = (200, 90)
@@ -362,7 +509,7 @@ if __name__ == "__main__":
     tmp_video_dir_inp = out_file_base_tmp + '/inp'
     os.makedirs(tmp_video_dir_inp, exist_ok = True)
     text_corner_dir = tmp_video_dir_inp + '/tc'
-    img_dir = tmp_video_dir_inp + '/images'
+    img_dir = out_file_base + '/images'
     concat_file = f'{tmp_video_dir_inp}/concat.mp4'
     gpmf_file = f'{out_file_base}/gpmf.bin'
     with open(log_file, "w+") as lfd:
@@ -374,8 +521,6 @@ if __name__ == "__main__":
             shutil.rmtree(out_file_base_tmp)
         os.makedirs(text_corner_dir, exist_ok = True)
         os.makedirs(img_dir, exist_ok = True)
-        # create one list of all points in all of the videos on cmd line
-        points = list()
         file_list = list()
         p = re.compile(args.dir + '/(.*)' + "\." + MP4 + '$')
         # p = re.compile(args.dir + '/(GH.*)' + "\." + MP4 + '$')
@@ -404,25 +549,20 @@ if __name__ == "__main__":
 
         points, start_time = gopro2gpx.main_core(dump_metadata(), concat_file, out_file_base)
         if points:
-            for point in points:
-                if point.dop < 500:
-                    break
-            if point.latitude and point.longitude:
-                timezone_str = tzwhere.tzwhere().tzNameAt(point.latitude, point.longitude)
-                if timezone_str:
-                    timezone = pytz.timezone(timezone_str)
-            if timezone:
-                local_time = timezone.fromutc(start_time)
-            start_time_local = datetime.datetime.fromtimestamp(round(local_time.timestamp()))
             start_time_rounded = datetime.datetime.fromtimestamp(round(start_time.timestamp()))
-            base_name = f'{start_time_local}_{args.outputname}'
-            add_subtitles(points, start_time_rounded)
+            timezone, start_time_local_rounded = get_local_time(points)
+            base_name_time = start_time_local_rounded if start_time_local_rounded else start_time_rounded
+            base_name = f'{base_name_time.strftime("%Y.%m.%d %H:%M:%S")}_{args.outputname}'
+            subtitle_video, gps_points = add_subtitles(points, start_time_rounded)
+            img_width = add_images(gps_points)
+            create_ovl_video(subtitle_video, img_width)
+            shutil.move(concat_file, f'{out_file_base}/{base_name}.{MP4}')
             new_dir = f'{args.outdir}ovl/{base_name}'
             shutil.rmtree(f'{new_dir}', ignore_errors = True)
             shutil.move(out_file_base, new_dir)
-            shutil.rmtree(f'{new_dir}/tmp')
+            # shutil.rmtree(f'{new_dir}/tmp')
 
         dur = datetime.datetime.now()
-        process_duration = (dur - start).total_seconds()
-        print_time(process_duration, "process")
+        process_duration = str(dur - start)
+        print_log(f"process duration: {process_duration}")
 
