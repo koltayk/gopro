@@ -183,6 +183,8 @@ def angle_from_coordinate(lat1, long1, lat2, long2):
 
 def create_list_images(chunk):
     params = list()
+    params.append('-i')
+    params.append(base_img)
     for img in chunk:
         params.append('-i')
         params.append(str(img))
@@ -273,15 +275,15 @@ def create_ovl_video(subtitle_video, img_width):
     for index, chunk in enumerate(chunks):
         list_images = create_list_images(chunk)
         filter_list = list()
+        filter_list.append(f"[0:v][1:v] overlay={width - img_width}:{ovl_pos_y}:enable='between(t,0,{len(chunk)})'[v1]")
         for i in range(len(chunk)):
-            filter_list.append(f"[v{i}][{i+1}:v] overlay={width - img_width}:{ovl_pos_y}:enable='between(t,{i},{i+0.99999})'[v{i+1}]")
+            new_video = f'[v{i+2}]' if i < len(chunk) - 1 else ''
+            filter_list.append(f"[v{i+1}][{i+2}:v] overlay={width - img_width}:{ovl_pos_y}:enable='between(t,{i+1},{i+1.99999})'{new_video}")
         filter_complex = ";\n".join(filter_list)
-        p = re.compile('^\[v0\](.*)\[v\d+\]$', re.DOTALL)  # @UndefinedVariable only for PyDev
-        m = p.match(filter_complex)
         out_filter = out_file_base_tmp + "/filter"
         print_log(f"Writing output temp filter to {out_filter}")
         with open(out_filter, "w") as fd:
-            print('[0:v]' + m.group(1), file = fd)
+            print(filter_complex, file = fd)
 
         out_video_part_mp4 = f'{out_file_base_tmp}/part-{str(index)}.mp4'
         dur = str(len(chunk))
@@ -482,21 +484,24 @@ def add_images(points):
                 track_line.append(track_point)
         img_points.append((elevation_point, track_point))
     lines, step, main_step = create_elevation_niveau_lines(min_hight, max_hight, elev_img_size, buffer)
+    img = Image.new('RGBA', img_size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([(0, 0), elev_img_size], fill = (0, 0, 0, 50), outline = (0, 0, 0, 100), width = 1)
+    for line_dict in lines:
+        line_width = 2 if line_dict["niveau"] * step % main_step == 0 else 1
+        draw.line(line_dict["line"], fill = (55, 55, 55), width = line_width)
+        draw.text((0, line_dict["hight"] - 5), str(int(line_dict["niveau"] * step)), font = fnt, fill = (55, 55, 55))
+    if elevation_line:
+        draw.line(elevation_line, fill = (255, 255, 0), width = 1)
+    draw.rectangle([(elev_img_size[0], 0), (img_size[0], track_img_size[1])], fill = (0, 0, 0, 50), outline = (0, 0, 0, 100), width = 1)
+    draw.line(track_line, fill = (255, 255, 128), width = 1)
+    # img.show()
+    img.save(base_img)
     for act_sec, (elevation_point, track_point) in enumerate(img_points):
         img = Image.new('RGBA', img_size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        draw.rectangle([(0, 0), elev_img_size], fill = (0, 0, 0, 50), outline = (0, 0, 0, 100), width = 1)
-        for line_dict in lines:
-            line_width = 2 if line_dict["niveau"] * step % main_step == 0 else 1
-            draw.line(line_dict["line"], fill = (55, 55, 55), width = line_width)
-            draw.text((0, line_dict["hight"] - 5), str(int(line_dict["niveau"] * step)), font = fnt, fill = (55, 55, 55))
-        if elevation_line:
-            draw.line(elevation_line, fill = (255, 255, 0), width = 1)
         if elevation_point:
             draw.ellipse(((elevation_point[0] - 2, elevation_point[1] - 2), (elevation_point[0] + 2, elevation_point[1] + 2)), fill = (255, 0, 0), width = 4)
-
-        draw.rectangle([(elev_img_size[0], 0), (img_size[0], track_img_size[1])], fill = (0, 0, 0, 50), outline = (0, 0, 0, 100), width = 1)
-        draw.line(track_line, fill = (255, 255, 128), width = 1)
         if track_point:
             draw.ellipse(((track_point[0] - 2, track_point[1] - 2), (track_point[0] + 2, track_point[1] + 2)), fill = (255, 0, 0), width = 4)
         # img.show()
@@ -545,6 +550,7 @@ if __name__ == "__main__":
     os.makedirs(tmp_video_dir_inp, exist_ok = True)
     text_corner_dir = tmp_video_dir_inp + '/tc'
     img_dir = out_file_base + '/images'
+    base_img = f'{img_dir}/base.png'
     concat_file = f'{tmp_video_dir_inp}/concat.mp4'
     gpmf_file = f'{out_file_base}/gpmf.bin'
     with open(log_file, "w+") as lfd:
