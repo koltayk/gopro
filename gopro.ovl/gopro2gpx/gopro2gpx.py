@@ -10,12 +10,14 @@
 import datetime
 import sys
 
+from gpmf import goproovl
+
 from . import fourCC
 from . import gpmf
 from . import gpshelper
 
 
-def BuildGPSPoints(data, skip = False, skipDop = False, dopLimit = 2000):
+def BuildGPSPoints(data, skip = True, skipDop = True, dopLimit = 500):
     """
     Data comes UNSCALED so we have to do: Data / Scale.
     Do a finite state machine to process the labels.
@@ -40,7 +42,8 @@ def BuildGPSPoints(data, skip = False, skipDop = False, dopLimit = 2000):
         'badfixskip': 0,
         'empty': 0,
         'baddop': 0,
-        'baddopskip': 0
+        'baddopskip': 0,
+        'badspeep': 0
     }
 
     # GPSP is 100x DoP
@@ -67,12 +70,12 @@ def BuildGPSPoints(data, skip = False, skipDop = False, dopLimit = 2000):
             TMPC = d.data
         elif d.fourCC == 'GPSU':
             GPSU = d.data
-            print(f"GPSU {d.data}")
+            goproovl.print_log(f"GPSU {d.data}")
             if start_time is None:
                 start_time = GPSU
         elif d.fourCC == 'GPSF':
             if d.data != GPSFIX:
-                print("GPSFIX change to %s [%s]" % (d.data, fourCC.LabelGPSF.xlate[d.data]))
+                goproovl.print_log("GPSFIX change to %s [%s]" % (d.data, fourCC.LabelGPSF.xlate[d.data]))
             GPSFIX = d.data
 
         elif d.fourCC == 'TSMP':
@@ -84,36 +87,41 @@ def BuildGPSPoints(data, skip = False, skipDop = False, dopLimit = 2000):
         elif d.fourCC == 'GPS5':
             # we have to use the REPEAT value.
             # gopro has a 18 Hz sample of writting the GPS5 value, so use it to compute delta
-            # print("len", len(d.data))
+            # goproovl.print_log("len", len(d.data))
             t_delta = 1 / len(d.data)
             sample_count = 0
             for item in d.data:
 
                 if item.lon == item.lat == item.alt == 0:
-                    print("Warning: Skipping empty point")
+                    goproovl.print_log("Warning: Skipping empty point")
                     stats['empty'] += 1
                     continue
 
-                if GPSFIX == 0:
+                if GPSFIX < 3:
                     stats['badfix'] += 1
                     if skip:
-                        print("Warning: Skipping point due GPSFIX==0")
+                        goproovl.print_log("Warning: Skipping point due GPSFIX<3")
                         stats['badfixskip'] += 1
                         continue
 
                 if GPSP is not None and GPSP > dopLimit:
                     stats["baddop"] += 1
                     if skipDop:
-                        print("Warning: skipping point due to GPSP>limit. GPSP: %s, limit: %s" % (GPSP, dopLimit))
+                        goproovl.print_log("Warning: skipping point due to GPSP>limit. GPSP: %s, limit: %s" % (GPSP, dopLimit))
                         stats["baddopskip"] += 1
                         continue
 
                 retdata = [ float(x) / float(y) for x, y in zip(item._asdict().values() , list(SCAL)) ]
 
                 gpsdata = fourCC.GPSData._make(retdata)
+                if gpsdata.speed > 35:
+                    stats["badspeep"] += 1
+                    goproovl.print_log(f"Warning: Skipping point due to speed {gpsdata.speed} > 35 m/s")
+                    continue
+
                 p = gpshelper.GPSPoint(gpsdata.lat, gpsdata.lon, gpsdata.alt, GPSU + datetime.timedelta(seconds = sample_count * t_delta), gpsdata.speed, TMPC, GPSP)
                 if points and p.time < points[-1].time:
-                    print(f"Warning: p.time < points[-1].time {p.time} < {points[-1].time}  len(points): {len(points)}")
+                    goproovl.print_log(f"Warning: p.time < points[-1].time {p.time} < {points[-1].time}  len(points): {len(points)}")
                 else:
                     points.append(p)
                 stats['ok'] += 1
@@ -128,14 +136,14 @@ def BuildGPSPoints(data, skip = False, skipDop = False, dopLimit = 2000):
             # KARMA GPRI info
 
             if d.data.lon == d.data.lat == d.data.alt == 0:
-                print("Warning: Skipping empty point")
+                goproovl.print_log("Warning: Skipping empty point")
                 stats['empty'] += 1
                 continue
 
             if GPSFIX == 0:
                 stats['badfix'] += 1
                 if skip:
-                    print("Warning: Skipping point due GPSFIX==0")
+                    goproovl.print_log("Warning: Skipping point due GPSFIX==0")
                     stats['badfixskip'] += 1
                     continue
 
@@ -143,33 +151,34 @@ def BuildGPSPoints(data, skip = False, skipDop = False, dopLimit = 2000):
             gpsdata = fourCC.KARMAGPSData._make(data)
 
             if SYST.seconds != 0 and SYST.miliseconds != 0:
-                print("XX", SYST.miliseconds)
+                goproovl.print_log("XX", SYST.miliseconds)
                 p = gpshelper.GPSPoint(gpsdata.lat, gpsdata.lon, gpsdata.alt, datetime.fromtimestamp(SYST.miliseconds), gpsdata.speed)
                 points.append(p)
                 stats['ok'] += 1
 
         elif d.fourCC == 'GPSP':
             if GPSP != d.data:
-                print("GPSP change to %s [%s]" % (d.data, fourCC.LabelGPSP.xlate(d.data)))
+                goproovl.print_log("GPSP change to %s [%s]" % (d.data, fourCC.LabelGPSP.xlate(d.data)))
             GPSP = d.data
 
-    print("-- stats -----------------")
+    goproovl.print_log("-- stats -----------------")
     total_points = 0
     for i in stats.keys():
         total_points += stats[i]
-    print("Device: %s" % DVNM)
-    print("- Ok:              %5d" % stats['ok'])
-    print("- GPSFIX=0 (bad):  %5d (skipped: %d)" % (stats['badfix'], stats['badfixskip']))
-    print("- GPSP>%4d (bad): %5d (skipped: %d)" % (dopLimit, stats['baddop'], stats['baddopskip']))
-    print("- Empty (No data): %5d" % stats['empty'])
-    print("Total points:      %5d" % total_points)
-    print("--------------------------")
+    goproovl.print_log("Device: %s" % DVNM)
+    goproovl.print_log("- Ok:              %5d" % stats['ok'])
+    goproovl.print_log("- GPSFIX=0 (bad):  %5d (skipped: %d)" % (stats['badfix'], stats['badfixskip']))
+    goproovl.print_log("- GPSP>%4d (bad): %5d (skipped: %d)" % (dopLimit, stats['baddop'], stats['baddopskip']))
+    goproovl.print_log("- Empty (No data): %5d" % stats['empty'])
+    goproovl.print_log("Total points:      %5d" % total_points)
+    goproovl.print_log("--------------------------")
     return(points, start_time, DVNM)
 
 
-def main_core(gopro_binary, input_file, out_file_base):
+def main_core(gopro_binary, input_file, out_file_base, lfd):
     points = []
     start_time = None
+    goproovl.lfd = lfd
 
     data = gpmf.parseStream(gopro_binary, 0)
 
@@ -180,7 +189,7 @@ def main_core(gopro_binary, input_file, out_file_base):
     points, start_time, device_name = BuildGPSPoints(data)
 
     if len(points) == 0:
-        print(f"Can't create file. No GPS info in {input_file}. Exitting")
+        goproovl.print_log(f"Can't create file. No GPS info in {input_file}. Exitting")
         sys.exit(0)
 
     kml = gpshelper.generate_KML(points)
@@ -190,10 +199,10 @@ def main_core(gopro_binary, input_file, out_file_base):
     # csv = gpshelper.generate_CSV(points)
     # with open("%s.csv" % config.outputfile , "w+") as fd:
     #    fd.write(csv)
-
-    gpx = gpshelper.generate_GPX(points, start_time, trk_name = device_name)
-    with open(f"{out_file_base}/gpmf.gpx", "w") as fd:
-        fd.write(gpx)
+    #
+    # gpx = gpshelper.generate_GPX(points, start_time, trk_name = device_name)
+    # with open(f"{out_file_base}/gpmf.gpx", "w") as fd:
+    #     fd.write(gpx)
 
     return points, start_time
 

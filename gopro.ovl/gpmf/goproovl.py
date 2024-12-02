@@ -27,6 +27,7 @@ import pytz
 from tzwhere import tzwhere  # https://github.com/pegler/pytzwhere/issues/53
 
 from gopro2gpx import gopro2gpx
+from gopro2gpx import gpshelper
 import numpy as np
 
 FFMPEG = "/usr/bin/ffmpeg"
@@ -173,17 +174,11 @@ def create_subtitle_text(gps_points, start_time, act_sec, sfd):
 
 
 def angle_from_coordinate(lat1, long1, lat2, long2):
-    dLon = (long2 - long1)
-
-    y = math.sin(math.radians(dLon)) * math.cos(math.radians(lat2))
-    x = math.cos(math.radians(lat1)) * math.sin(math.radians(lat2)) - math.sin(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.cos(math.radians(dLon))
-
-    brng = math.atan2(y, x)
-
-    brng = math.degrees(brng)
-    brng = (brng + 360) % 360
-
-    return brng
+    x = (long2 - long1) * lon_factor
+    y = lat2 - lat1
+    brng = math.degrees(math.atan2(y, x))
+    direction = (450 - brng) % 360
+    return direction
 
 
 def create_list_images(chunk):
@@ -229,16 +224,19 @@ def call_prog(params):
 def add_subtitles(points, start_time):
     p_index = 0
     gps_points = []
+    true_gps_points = []
     curr_time_rounded = start_time
     for act_sec in range(round(duration_sec)):
         p_index, dist_sec_last = get_nearest_gps_datum(points, p_index, curr_time_rounded)
         point = points[p_index]
         if dist_sec_last > 0.5:
             point = None
+        else:
+            true_gps_points.append(point)
         gps_points.append(point)
         print(f"{act_sec} {curr_time_rounded} {p_index} {points[p_index].time}")
         curr_time_rounded = curr_time_rounded + datetime.timedelta(seconds = 1)
-    subtitle_file = f'{out_file_base}/subtitle.ass'
+    subtitle_file = f'{out_file_base}/{base_name}_subtitle.ass'
     with open(subtitle_file, "w") as sfd:
         print(SUBTITLES_PREF, file = sfd)
         for act_sec in range(len(gps_points)):
@@ -250,7 +248,7 @@ def add_subtitles(points, start_time):
     print_log(f"Writing subtitles to {subtitle_video} returncode: {rc}")
     if rc != 0:
         exit()
-    return subtitle_video, gps_points
+    return subtitle_video, gps_points, true_gps_points
 
 
 def get_nearest_gps_datum(points, p_index, curr_time_rounded):
@@ -269,7 +267,7 @@ def get_nearest_gps_datum(points, p_index, curr_time_rounded):
 def create_ovl_video(subtitle_video, img_width):
     list_all_images = sorted(Path(img_dir).iterdir())
     video_parts_out = list()
-    chunk_size = 720
+    chunk_size = 600
     beg = 0
     chunks = chunker(list_all_images, chunk_size)  # need more than 1 chunks because of ffmpeg/my computer could not handle more streams
     for index, chunk in enumerate(chunks):
@@ -287,7 +285,7 @@ def create_ovl_video(subtitle_video, img_width):
 
         out_video_part_mp4 = f'{out_file_base_tmp}/part-{str(index)}.mp4'
         dur = str(len(chunk))
-        params = [FFMPEG, '-threads', '16', '-y', '-ss', str(beg), '-t', str(dur), '-i', subtitle_video, *list_images, '-filter_complex_script', out_filter, '-pix_fmt', 'yuv420p', '-c:a', 'copy', out_video_part_mp4]
+        params = [FFMPEG, '-threads', '16', '-y', '-ss', str(beg), '-t', str(dur), '-i', subtitle_video, *list_images, '-filter_complex_script', out_filter, '-pix_fmt', 'yuv420p', '-c:a', 'copy', out_video_part_mp4, '-hide_banner']
         rc = call_prog(params)
         print_log(f"Writing output temp_dir to {out_video_part_mp4} returncode: {rc}")
         if rc != 0:
@@ -375,6 +373,7 @@ def cut(begin, end, index, video_file_name):
 
 
 def get_local_time(points):
+    global lon_factor
     timezone = None
     start_time_local_rounded = None
     for point in points:
@@ -384,19 +383,23 @@ def get_local_time(points):
         timezone_str = tzwhere.tzwhere().tzNameAt(point.latitude, point.longitude)
         if timezone_str:
             timezone = pytz.timezone(timezone_str)
+        if not lon_factor:
+            lon_factor = math.cos(math.radians(point.latitude))
     if timezone:
         local_time = timezone.fromutc(start_time)
         start_time_local_rounded = datetime.datetime.fromtimestamp(round(local_time.timestamp()))
     return timezone, start_time_local_rounded
 
 
-def calc_track_img_size(min_lat, max_lat, min_lon, max_lon, max_track_img_size):
+def calc_track_img_size(min_lat, max_lat, min_lon, max_lon, max_track_img_size, buffer):
     track_x = (max_lon - min_lon) * math.cos(math.radians(min_lat))
     track_y = max_lat - min_lat
     if track_x < track_y:
-        return (round((track_x / track_y) * max_track_img_size), max_track_img_size)
+        img_width = round((track_x / track_y) * max_track_img_size) if track_y else 2 * buffer
+        return (img_width, max_track_img_size)
     else:
-        return (max_track_img_size, round((track_y / track_x) * max_track_img_size))
+        img_heigth = round((track_y / track_x) * max_track_img_size) if track_x else 2 * buffer
+        return (max_track_img_size, img_heigth)
 
 
 def create_track_point(point, min_lat, max_lat, min_lon, max_lon):
@@ -406,21 +409,36 @@ def create_track_point(point, min_lat, max_lat, min_lon, max_lon):
 
 
 def create_elevation_niveau_lines(min_hight, max_hight, elev_img_size, buffer):
-    exp = round(math.log(max_hight - min_hight, 10))
-    step = int(math.pow(10, exp))
+    if max_hight > min_hight:
+        exp = round(math.log(max_hight - min_hight, 10))
+        step = int(math.pow(10, exp))
+        main_step = step
+        lines = calc_lines(min_hight, max_hight, step, elev_img_size, buffer)
+        if len(lines) < 4:
+            step = step / 2
+            lines = calc_lines(min_hight, max_hight, step, elev_img_size, buffer)
+        if len(lines) < 4:
+            step = step * 2 / 5
+            lines = calc_lines(min_hight, max_hight, step, elev_img_size, buffer)
+        if len(lines) < 4:
+            step = step / 2
+            lines = calc_lines(min_hight, max_hight, step, elev_img_size, buffer)
+
+    return lines, step, main_step
+
+
+def calc_lines(min_hight, max_hight, step, elev_img_size, buffer):
+    lines = list()
     min = math.floor(min_hight / step)
     max = math.ceil(max_hight / step)
-    if max - min < 3:
-        step = step / 5
-        min = math.floor(min_hight / step)
-        max = math.ceil(max_hight / step)
-
-    lines = list()
     for niveau in range(min, max):
         hight = calc_y(niveau, min_hight, max_hight, step, elev_img_size, buffer)
         if 0 <= hight <= elev_img_size[1]:
-            line = ([(20, hight), (elev_img_size[0], hight)], hight, str(int(niveau * step)))
-            lines.append(line)
+            line_dict = {}
+            line_dict["line"] = [(20, hight), (elev_img_size[0] - buffer, hight)]
+            line_dict["hight"] = hight
+            line_dict["niveau"] = niveau
+            lines.append(line_dict)
     return lines
 
 
@@ -437,37 +455,50 @@ def add_images(points):
     fnt = ImageFont.truetype(fontname, fontsize)
 
     elevation_line = list()
-    min_hight = min(p.elevation for p in points)
-    max_hight = max(p.elevation for p in points)
+    valid_points = list()
+    for p in points:
+        if p:
+            valid_points.append(p)
+    # valid_points = filter(lambda p:p, points)
+    min_hight = min(p.elevation for p in valid_points)
+    max_hight = max(p.elevation for p in valid_points)
     track_line = list()
-    min_lat = min(p.latitude for p in points)
-    max_lat = max(p.latitude for p in points)
-    min_lon = min(p.longitude for p in points)
-    max_lon = max(p.longitude for p in points)
-    track_img_size = calc_track_img_size(min_lat, max_lat, min_lon, max_lon, max_track_img_size)
+    min_lat = min(p.latitude for p in valid_points)
+    max_lat = max(p.latitude for p in valid_points)
+    min_lon = min(p.longitude for p in valid_points)
+    max_lon = max(p.longitude for p in valid_points)
+    track_img_size = calc_track_img_size(min_lat, max_lat, min_lon, max_lon, max_track_img_size, buffer)
     img_size = (elev_img_size[0] + track_img_size[0], max(elev_img_size[1], track_img_size[1]))
     img_points = list()
     for act_sec, point in enumerate(points):
-        elevation_point = (buffer + (elev_img_size[0] - 2 * buffer) * act_sec / len(points), buffer + (elev_img_size[1] - 2 * buffer) * (max_hight - point.elevation) / (max_hight - min_hight))
-        elevation_line.append(elevation_point)
-        lat, lon = create_track_point(point, min_lat, max_lat, min_lon, max_lon)
-        track_point = (elev_img_size[0] + buffer + (track_img_size[0] - 2 * buffer) * lon, buffer + (track_img_size[1] - 2 * buffer) * lat)
-        track_line.append(track_point)
+        elevation_point = None
+        track_point = None
+        if point:
+            if max_hight > min_hight:
+                elevation_point = (buffer + (elev_img_size[0] - 2 * buffer) * act_sec / len(points), buffer + (elev_img_size[1] - 2 * buffer) * (max_hight - point.elevation) / (max_hight - min_hight))
+                elevation_line.append(elevation_point)
+                lat, lon = create_track_point(point, min_lat, max_lat, min_lon, max_lon)
+                track_point = (elev_img_size[0] + buffer + (track_img_size[0] - 2 * buffer) * lon, buffer + (track_img_size[1] - 2 * buffer) * lat)
+                track_line.append(track_point)
         img_points.append((elevation_point, track_point))
-    lines = create_elevation_niveau_lines(min_hight, max_hight, elev_img_size, buffer)
+    lines, step, main_step = create_elevation_niveau_lines(min_hight, max_hight, elev_img_size, buffer)
     for act_sec, (elevation_point, track_point) in enumerate(img_points):
         img = Image.new('RGBA', img_size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         draw.rectangle([(0, 0), elev_img_size], fill = (0, 0, 0, 50), outline = (0, 0, 0, 100), width = 1)
-        for line in lines:
-            draw.line(line[0], fill = (55, 55, 55), width = 1)
-            draw.text((0, line[1] - 5), line[2], font = fnt, fill = (55, 55, 55))
-        draw.line(elevation_line, fill = (255, 255, 0), width = 1)
-        draw.ellipse(((elevation_point[0] - 2, elevation_point[1] - 2), (elevation_point[0] + 2, elevation_point[1] + 2)), fill = (255, 0, 0), width = 4)
+        for line_dict in lines:
+            line_width = 2 if line_dict["niveau"] * step % main_step == 0 else 1
+            draw.line(line_dict["line"], fill = (55, 55, 55), width = line_width)
+            draw.text((0, line_dict["hight"] - 5), str(int(line_dict["niveau"] * step)), font = fnt, fill = (55, 55, 55))
+        if elevation_line:
+            draw.line(elevation_line, fill = (255, 255, 0), width = 1)
+        if elevation_point:
+            draw.ellipse(((elevation_point[0] - 2, elevation_point[1] - 2), (elevation_point[0] + 2, elevation_point[1] + 2)), fill = (255, 0, 0), width = 4)
 
-        draw.rectangle([(elev_img_size[0], 0), img_size], fill = (0, 0, 0, 50), outline = (0, 0, 0, 100), width = 1)
-        draw.line(track_line, fill = (0, 0, 0), width = 1)
-        draw.ellipse(((track_point[0] - 2, track_point[1] - 2), (track_point[0] + 2, track_point[1] + 2)), fill = (255, 0, 0), width = 4)
+        draw.rectangle([(elev_img_size[0], 0), (img_size[0], track_img_size[1])], fill = (0, 0, 0, 50), outline = (0, 0, 0, 100), width = 1)
+        draw.line(track_line, fill = (255, 255, 128), width = 1)
+        if track_point:
+            draw.ellipse(((track_point[0] - 2, track_point[1] - 2), (track_point[0] + 2, track_point[1] + 2)), fill = (255, 0, 0), width = 4)
         # img.show()
         img.save(f"{img_dir}/{(act_sec+1):04d}.png")
     return img_size[0]
@@ -488,6 +519,8 @@ def parseArgs():
     return args
 
 
+lfd = None
+
 if __name__ == "__main__":
     args = parseArgs()
     timezone = None
@@ -499,12 +532,14 @@ if __name__ == "__main__":
     ovl_pos_x = 0
     ovl_pos_y = 0
     width = 0
+    lon_factor = None
     # ovl_pos_y = 2060
     # ovl_pos_y = 1430
     ovl_size = (200, 90)
     start = datetime.datetime.now()
-    out_file_base = f'{args.outdir}pgovl/{args.dir.split("/")[-1]}/{args.outputname}'
-    log_file = out_file_base + "/log"
+    dir_num = args.dir.split("/")[-1]
+    out_file_base = f'{args.outdir}pgovl/{dir_num}/{args.outputname}'
+    log_file = f'{out_file_base}/{args.outputname}_{dir_num}.log'
     out_file_base_tmp = out_file_base + "/tmp"
     tmp_video_dir_inp = out_file_base_tmp + '/inp'
     os.makedirs(tmp_video_dir_inp, exist_ok = True)
@@ -547,20 +582,30 @@ if __name__ == "__main__":
 
         concat_video(video_parts_inp, concat_file)
 
-        points, start_time = gopro2gpx.main_core(dump_metadata(), concat_file, out_file_base)
+        points, start_time = gopro2gpx.main_core(dump_metadata(), concat_file, out_file_base, lfd)
+        # points = True  ####################################################
         if points:
             start_time_rounded = datetime.datetime.fromtimestamp(round(start_time.timestamp()))
             timezone, start_time_local_rounded = get_local_time(points)
             base_name_time = start_time_local_rounded if start_time_local_rounded else start_time_rounded
             base_name = f'{base_name_time.strftime("%Y.%m.%d %H:%M:%S")}_{args.outputname}'
-            subtitle_video, gps_points = add_subtitles(points, start_time_rounded)
+            subtitle_video, gps_points, true_gps_points = add_subtitles(points, start_time_rounded)
+            gpx = gpshelper.generate_GPX(true_gps_points, start_time, trk_name = base_name)
+            with open(f"{out_file_base}/gpmf.gpx", "w") as fd:
+                fd.write(gpx)
             img_width = add_images(gps_points)
             create_ovl_video(subtitle_video, img_width)
+            # base_name = '2020.06.12 12:17:59_Stoderzinken'  ####################################################
+            # create_ovl_video(f'{out_file_base}/{base_name}.{MP4}', 530)  ####################################################
             shutil.move(concat_file, f'{out_file_base}/{base_name}.{MP4}')
             new_dir = f'{args.outdir}ovl/{base_name}'
             shutil.rmtree(f'{new_dir}', ignore_errors = True)
             shutil.move(out_file_base, new_dir)
-            # shutil.rmtree(f'{new_dir}/tmp')
+            shutil.move(f'{new_dir}/gpmf.klv', f'{new_dir}/{base_name}_gpmf.klv')
+            shutil.move(f'{new_dir}/gpmf.kml', f'{new_dir}/{base_name}.kml')
+            shutil.move(f'{new_dir}/gpmf.gpx', f'{new_dir}/{base_name}.gpx')
+            shutil.move(f'{new_dir}/gpmf.bin', f'{new_dir}/{base_name}_gpmf.bin')
+            shutil.rmtree(f'{new_dir}/tmp')
 
         dur = datetime.datetime.now()
         process_duration = str(dur - start)
