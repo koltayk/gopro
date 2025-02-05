@@ -14,6 +14,7 @@ should work on Windows as well with proper path to ffmpeg.
 
 import argparse
 import datetime
+import glob
 import json
 import math
 import os
@@ -36,6 +37,8 @@ GPSFREQU = 18
 MP4 = 'MP4'
 PNG = '.png'
 MAXEND = 1000
+map_gpmf = ['-map', '0:3']
+
 SUBTITLES_PREF = """[Script Info]
 Title: Example Subtitles
 ScriptType: v4.00+
@@ -74,10 +77,10 @@ def dump_metadata():
     global duration_sec
     global ovl_pos_y
     global width
-    params = [FFPROBE, '-i', concat_file, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', '-hide_banner']
+    params = [FFPROBE, '-i', concat_video, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', '-hide_banner']
     print_log(" ".join(params))
     (o, e) = Popen(params, stdout = PIPE, stderr = PIPE).communicate()
-    print_log(f"Read metadata from {concat_file}")
+    print_log(f"Read metadata from {concat_video}")
     metadata = json.loads(o)
     duration_sec = float(metadata['format']['duration'])
     print(f"Length of file is: {duration_sec} sec")
@@ -100,17 +103,17 @@ def dump_metadata():
             img_pos_x = 0
             img_pos_y = height - ovl_size[1]
 
-    params = [FFMPEG, '-threads', '16', '-i', concat_file, '-vf', f'fps=1,crop={ovl_size[0]}:{ovl_size[1]}:{img_pos_x}:{img_pos_y}', text_corner_dir + '/%04d.png', '-hide_banner']
+    params = [FFMPEG, '-threads', '16', '-i', concat_video, '-vf', f'fps=1,crop={ovl_size[0]}:{ovl_size[1]}:{img_pos_x}:{img_pos_y}', text_corner_dir + '/%05d.png', '-hide_banner']
     rc = call_prog(params)
-    print_log(f"Read frames pro second from {concat_file} to {text_corner_dir} returncode: {rc}")
+    print_log(f"Read frames pro second from {concat_video} to {text_corner_dir} returncode: {rc}")
     if rc != 0:
         exit()
 
-    params = [FFMPEG, '-threads', '16', '-y', '-i', concat_file, '-codec', 'copy', '-map', '0:2', '-f', 'rawvideo', '-']
+    params = [FFMPEG, '-threads', '16', '-y', '-i', concat_video, '-codec', 'copy', '-map', '0:2', '-f', 'rawvideo', '-']
     print_log(" ".join(params))
     (o, e) = Popen(params, stdout = PIPE, stderr = PIPE).communicate()
     Path(gpmf_file).write_bytes(o)
-    print_log(f"Read gpmf data from {concat_file}")
+    print_log(f"Read gpmf data from {concat_video}")
     return o
     # return BytesIO(o)
 
@@ -129,6 +132,7 @@ def calc_direction_ift(gps_datum_prev, gps_datum_next, text0, text1):
 
 
 def create_subtitle_text(gps_points, start_time, act_sec, sfd):
+    colorText = get_text_color(act_sec)
     gps_datum_prev = None if act_sec == 0 else gps_points[act_sec - 1]
     gps_datum = gps_points[act_sec]
     gps_datum_next = None if act_sec + 1 == len(gps_points) else gps_points[act_sec + 1]
@@ -151,7 +155,6 @@ def create_subtitle_text(gps_points, start_time, act_sec, sfd):
         time_str = timezone.fromutc(time).strftime("%Y.%m.%d %H:%M:%S")
     else:
         time_str = time.strftime("%Y.%m.%d %H:%M:%S")
-    colorText = get_text_color(act_sec)
     ts0 = datetime.timedelta(seconds = act_sec)
     ts1 = datetime.timedelta(seconds = act_sec + 1)
     if args.upovl:
@@ -167,9 +170,9 @@ def create_subtitle_text(gps_points, start_time, act_sec, sfd):
         line_nr = '3b'
         print(f'Dialogue: 0,{ts0}.00,{ts1}.00,{colorText}{line_nr},,0000,0000,0000,,{time_str}', file = sfd)
         if text0:
-            line_nr = '1t'
+            line_nr = '1b'
             print(f'Dialogue: 0,{ts0}.00,{ts1}.00,{colorText}{line_nr},,0000,0000,0000,,{text0}', file = sfd)
-            line_nr = '2t'
+            line_nr = '2b'
             print(f'Dialogue: 0,{ts0}.00,{ts1}.00,{colorText}{line_nr},,0000,0000,0000,,{text1}', file = sfd)
 
 
@@ -196,18 +199,15 @@ def chunker(seq, size):
 
 
 def rotate(file_name):
-    if args.rotate:
-        file_name_rotate = file_name.replace(MP4, 'rotate.' + MP4)
-        params = [FFMPEG, '-threads', '16', '-i', file_name, '-map_metadata', '0', '-metadata:s:v:0', 'rotate=0', '-c', 'copy', '-y', file_name_rotate, '-hide_banner']
-        rc = call_prog(params)
+    file_name_rotate = file_name.replace(MP4, 'rotate.' + MP4)
+    params = [FFMPEG, '-threads', '16', '-i', file_name, '-map_metadata', '0', '-metadata:s:v:0', 'rotate=0', '-c', 'copy', '-y', file_name_rotate, '-hide_banner']
+    rc = call_prog(params)
 
-        print_log(f"Rotating output {file_name} to {file_name_rotate} returncode: {rc}")
-        if rc != 0:
-            exit()
+    print_log(f"Rotating output {file_name} to {file_name_rotate} returncode: {rc}")
+    if rc != 0:
+        exit()
 
-        return file_name_rotate
-    else:
-        return file_name
+    return file_name_rotate
 
 
 def call_prog(params):
@@ -223,7 +223,7 @@ def call_prog(params):
     return rc
 
 
-def add_subtitles(points, start_time):
+def create_subtitles(points, start_time):
     p_index = 0
     gps_points = []
     true_gps_points = []
@@ -238,19 +238,20 @@ def add_subtitles(points, start_time):
         gps_points.append(point)
         print(f"{act_sec} {curr_time_rounded} {p_index} {points[p_index].time}")
         curr_time_rounded = curr_time_rounded + datetime.timedelta(seconds = 1)
-    subtitle_file = f'{out_file_base}/{base_name}_subtitle.ass'
     with open(subtitle_file, "w") as sfd:
         print(SUBTITLES_PREF, file = sfd)
         for act_sec in range(len(gps_points)):
             create_subtitle_text(gps_points, start_time, act_sec, sfd)
+    return gps_points, true_gps_points
 
+
+def add_subtitles(inp_video):
     subtitle_video = f'{out_file_base}/{base_name}.{MP4}'
-    params = [FFMPEG, '-threads', '16', '-y', '-i', concat_file, '-i', subtitle_file, '-map', '0', '-map', '1', '-c', 'copy', '-c:s', 'mov_text', '-metadata:s:s:0', 'language=eng', subtitle_video, '-hide_banner']
+    params = [FFMPEG, '-threads', '16', '-y', '-i', inp_video, '-i', subtitle_file, '-map', '0', '-map', '1', '-c', 'copy', '-c:s', 'mov_text', '-metadata:s:s:0', 'language=eng', subtitle_video, '-hide_banner']
     rc = call_prog(params)
     print_log(f"Writing subtitles to {subtitle_video} returncode: {rc}")
     if rc != 0:
         exit()
-    return subtitle_video, gps_points, true_gps_points
 
 
 def get_nearest_gps_datum(points, p_index, curr_time_rounded):
@@ -266,7 +267,7 @@ def get_nearest_gps_datum(points, p_index, curr_time_rounded):
     return p_index - 1, dist_sec_last
 
 
-def create_ovl_video(subtitle_video, img_width):
+def create_ovl_video(img_width):
     list_all_images = sorted(Path(img_dir).iterdir())
     video_parts_out = list()
     chunk_size = 600
@@ -287,7 +288,7 @@ def create_ovl_video(subtitle_video, img_width):
 
         out_video_part_mp4 = f'{out_file_base_tmp}/part-{str(index)}.mp4'
         dur = str(len(chunk))
-        params = [FFMPEG, '-threads', '16', '-y', '-ss', str(beg), '-t', str(dur), '-i', subtitle_video, *list_images, '-filter_complex_script', out_filter, '-pix_fmt', 'yuv420p', '-c:a', 'copy', out_video_part_mp4, '-hide_banner']
+        params = [FFMPEG, '-threads', '16', '-y', '-ss', str(beg), '-t', str(dur), '-i', concat_video, *list_images, '-filter_complex_script', out_filter, '-pix_fmt', 'yuv420p', '-c:a', 'copy', out_video_part_mp4, '-hide_banner']
         rc = call_prog(params)
         print_log(f"Writing output temp_dir to {out_video_part_mp4} returncode: {rc}")
         if rc != 0:
@@ -296,7 +297,7 @@ def create_ovl_video(subtitle_video, img_width):
         video_parts_out.append(out_video_part_mp4)
         beg += chunk_size
 
-    concat_video(video_parts_out, f'{out_file_base}/{base_name}_ovl.{MP4}')
+    concat_video_files(video_parts_out, ovl_video)
 
 
 def print_log(param):
@@ -305,7 +306,34 @@ def print_log(param):
     print(string, file = lfd, flush = True)
 
 
-def concat_video(video_parts, concat_file_result):
+def prepare_concat(args, file_list):
+    video_parts_inp = list()
+#     file_list = list()
+#     p = re.compile(f'{args.dir}/(.*)\.{MP4}$')
+# # p = re.compile(args.dir + '/(GH.*)' + "\." + MP4 + '$')
+#     for file in inp_video_files:
+#         print_log(f"inp_video_file {file}")
+#         video_file_name = str(file)
+#         m = p.match(video_file_name)
+#         if m:
+#             file_list.append(m.group(1))
+
+    for index, video_file in enumerate(file_list):
+        # video_file_name = f'{args.dir}/{video_name}.{MP4}'
+        if index == 0:
+            begin = time_in_sec(args.begin)
+        else:
+            begin = 0
+        if index + 1 == len(file_list) and args.end:
+            end = time_in_sec(args.end)
+        else:
+            end = 0
+        video_parts_inp.append(cut(args.rotate, begin, end, index, video_file))
+
+    return video_parts_inp
+
+
+def concat_video_files(video_parts, concat_file_result):
     video_file_list = out_file_base_tmp + "/files"
     with open(video_file_list, "w") as fd:
         # for file, dur in video_parts:
@@ -322,7 +350,7 @@ def concat_video(video_parts, concat_file_result):
 
 
 def get_text_color (act_sec):
-    image_file = f"{text_corner_dir}/{(act_sec+1):04d}.png"
+    image_file = f"{text_corner_dir}/{(act_sec+1):05d}.png"
     img = Image.open(image_file)
 
     img_size = img.size
@@ -359,14 +387,17 @@ def inv_gam_sRGB(color):
             return math.pow(((colorChannel + 0.055) / 1.055), 2.4)
 
 
-def cut(begin, end, index, video_file_name):
-    video_file_name_rot = rotate(video_file_name)
+def cut(rotate, begin, end, index, video_file_name):
+    video_file_inp = rotate(video_file_name) if rotate else video_file_name
     out_video_part_ts = f'{tmp_video_dir_inp}/part-{str(index)}.ts'
     beg = str(begin)
     if end == 0:
         end = MAXEND
     dur = str(end - begin)
-    params = [FFMPEG, '-threads', '16', '-y', '-ss', beg, '-t', dur, '-i', video_file_name_rot, '-map', '0:0', '-map', '0:1', '-map', '0:3', '-c', 'copy', '-copyts', out_video_part_ts, '-hide_banner']
+    # params = [FFMPEG, '-threads', '16', '-y', '-ss', beg, '-t', dur, '-i', video_file_inp, '-map', '0:0', '-map', '0:1', '-map', '0:3', '-c', 'copy', '-copyts', out_video_part_ts, '-hide_banner']
+    params0 = [FFMPEG, '-threads', '16', '-y', '-ss', beg, '-t', dur, '-i', video_file_inp, '-map', '0:0', '-map', '0:1']
+    params2 = ['-c', 'copy', '-copyts', out_video_part_ts, '-hide_banner']
+    params = params0 + map_gpmf + params2
     rc = call_prog(params)
     print_log(f"Writing {out_video_part_ts} returncode: {rc}")
     if rc != 0:
@@ -448,7 +479,7 @@ def calc_y(hight, min_hight, max_hight, step, elev_img_size, buffer):
     return buffer + (elev_img_size[1] - 2 * buffer) * (max_hight - hight * step) / (max_hight - min_hight)
 
 
-def add_images(points):
+def add_images(points, valid_points):
     elev_img_size = (280, 120)
     max_track_img_size = 250
     buffer = 5
@@ -457,14 +488,9 @@ def add_images(points):
     fnt = ImageFont.truetype(fontname, fontsize)
 
     elevation_line = list()
-    valid_points = list()
-    for p in points:
-        if p:
-            valid_points.append(p)
-    # valid_points = filter(lambda p:p, points)
+    track_line = list()
     min_hight = min(p.elevation for p in valid_points)
     max_hight = max(p.elevation for p in valid_points)
-    track_line = list()
     min_lat = min(p.latitude for p in valid_points)
     max_lat = max(p.latitude for p in valid_points)
     min_lon = min(p.longitude for p in valid_points)
@@ -505,7 +531,7 @@ def add_images(points):
         if track_point:
             draw.ellipse(((track_point[0] - 2, track_point[1] - 2), (track_point[0] + 2, track_point[1] + 2)), fill = (255, 0, 0), width = 4)
         # img.show()
-        img.save(f"{img_dir}/{(act_sec+1):04d}.png")
+        img.save(f"{img_dir}/{(act_sec+1):05d}.png")
     return img_size[0]
 
 
@@ -531,8 +557,6 @@ if __name__ == "__main__":
     timezone = None
     out_file_base_tmp = None
     base_name = None
-    begin = 0
-    end = 0
     duration_sec = 0
     ovl_pos_x = 0
     ovl_pos_y = 0
@@ -551,62 +575,41 @@ if __name__ == "__main__":
     text_corner_dir = tmp_video_dir_inp + '/tc'
     img_dir = out_file_base + '/images'
     base_img = f'{img_dir}/base.png'
-    concat_file = f'{tmp_video_dir_inp}/concat.mp4'
+    concat_video = f'{out_file_base}/concat.{MP4}'
+    ovl_video = f'{out_file_base_tmp}/ovl.{MP4}'
     gpmf_file = f'{out_file_base}/gpmf.bin'
     with open(log_file, "w+") as lfd:
         print_log(f"begin {args.begin}, end {args.end}")
-        inp_video_files_all = sorted(Path(args.dir).iterdir())
-        inp_video_files = None
-        video_parts_inp = list()
         if os.path.exists(out_file_base):
             shutil.rmtree(out_file_base_tmp)
         os.makedirs(text_corner_dir, exist_ok = True)
         os.makedirs(img_dir, exist_ok = True)
-        file_list = list()
-        p = re.compile(args.dir + '/(.*)' + "\." + MP4 + '$')
-        # p = re.compile(args.dir + '/(GH.*)' + "\." + MP4 + '$')
-        if not inp_video_files:
-            inp_video_files = inp_video_files_all
-        for file in inp_video_files:
-            print_log(f"inp_video_file {file}")
-            video_file_name = str(file)
-            m = p.match(video_file_name)
-            if  m:
-                file_list.append(m.group(1))
 
-        for index, video_name in enumerate(file_list):
-            video_file_name = f'{args.dir}/{video_name}.{MP4}'
-            if index == 0:
-                begin = time_in_sec(args.begin)
-            else:
-                begin = 0
-            if index + 1 == len(file_list) and args.end:
-                end = time_in_sec(args.end)
-            else:
-                end = 0
-            video_parts_inp.append(cut(begin, end, index, video_file_name))
+        inp_video_files = sorted(glob.glob(f'{args.dir}/*.MP4'))
+        video_parts_inp = prepare_concat(args, inp_video_files)
+        concat_video_files(video_parts_inp, concat_video)
 
-        concat_video(video_parts_inp, concat_file)
-
-        points, start_time = gopro2gpx.main_core(dump_metadata(), concat_file, out_file_base, lfd)
-        # points = True  ####################################################
+        points, start_time = gopro2gpx.main_core(dump_metadata(), concat_video, out_file_base, lfd)
+#         points = True  ####################################################
         if points:
             start_time_rounded = datetime.datetime.fromtimestamp(round(start_time.timestamp()))
             timezone, start_time_local_rounded = get_local_time(points)
             base_name_time = start_time_local_rounded if start_time_local_rounded else start_time_rounded
             base_name = f'{base_name_time.strftime("%Y.%m.%d %H:%M:%S")}_{args.outputname}'
-            subtitle_video, gps_points, true_gps_points = add_subtitles(points, start_time_rounded)
+            # base_name = '2022.03.27 10:28:52_Sorica'  ####################################################
+            subtitle_file = f'{out_file_base}/{base_name}_subtitle.ass'
+            gps_points, true_gps_points = create_subtitles(points, start_time_rounded)
+            print_log(f"gps_points: {len(gps_points)}")
             gpx = gpshelper.generate_GPX(true_gps_points, start_time, trk_name = base_name)
             with open(f"{out_file_base}/gpmf.gpx", "w") as fd:
                 fd.write(gpx)
-            img_width = add_images(gps_points)
-            create_ovl_video(subtitle_video, img_width)
-            # base_name = '2020.06.12 12:17:59_Stoderzinken'  ####################################################
-            # create_ovl_video(f'{out_file_base}/{base_name}.{MP4}', 530)  ####################################################
-            shutil.move(concat_file, f'{out_file_base}/{base_name}.{MP4}')
+            img_width = add_images(gps_points, true_gps_points)
+            create_ovl_video(img_width)
+            add_subtitles(ovl_video)
             new_dir = f'{args.outdir}ovl/{base_name}'
             shutil.rmtree(f'{new_dir}', ignore_errors = True)
             shutil.move(out_file_base, new_dir)
+            shutil.move(f'{new_dir}/concat.{MP4}', f'{new_dir}/{base_name}_concat.{MP4}')
             shutil.move(f'{new_dir}/gpmf.klv', f'{new_dir}/{base_name}_gpmf.klv')
             shutil.move(f'{new_dir}/gpmf.kml', f'{new_dir}/{base_name}.kml')
             shutil.move(f'{new_dir}/gpmf.gpx', f'{new_dir}/{base_name}.gpx')

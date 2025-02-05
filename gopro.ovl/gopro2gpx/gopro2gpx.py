@@ -31,10 +31,12 @@ def BuildGPSPoints(data, skip = True, skipDop = True, dopLimit = 500):
 
     points = []
     start_time = None
+    first_GPSU = True
     SCAL = fourCC.XYZData(1.0, 1.0, 1.0)
     GPSU = None
     TMPC = None
     SYST = fourCC.SYSTData(0, 0)
+    last_gpsdata = None
 
     stats = {
         'ok': 0,
@@ -43,7 +45,8 @@ def BuildGPSPoints(data, skip = True, skipDop = True, dopLimit = 500):
         'empty': 0,
         'baddop': 0,
         'baddopskip': 0,
-        'badspeep': 0
+        'badspeep': 0,
+        'badlatlon': 0
     }
 
     # GPSP is 100x DoP
@@ -70,9 +73,13 @@ def BuildGPSPoints(data, skip = True, skipDop = True, dopLimit = 500):
             TMPC = d.data
         elif d.fourCC == 'GPSU':
             GPSU = d.data
-            goproovl.print_log(f"GPSU {d.data}")
+            goproovl.print_log(f"GPSU {GPSU}")
             if start_time is None:
                 start_time = GPSU
+            if (GPSU - start_time).total_seconds() > 999 and first_GPSU:  # ha az első GPSU hibás
+                goproovl.print_log(f"false start_time: {start_time}, GPSU: {GPSU}")
+                start_time = GPSU + datetime.timedelta(seconds = -1)
+            first_GPSU = False
         elif d.fourCC == 'GPSF':
             if d.data != GPSFIX:
                 goproovl.print_log("GPSFIX change to %s [%s]" % (d.data, fourCC.LabelGPSF.xlate[d.data]))
@@ -114,6 +121,13 @@ def BuildGPSPoints(data, skip = True, skipDop = True, dopLimit = 500):
                 retdata = [ float(x) / float(y) for x, y in zip(item._asdict().values() , list(SCAL)) ]
 
                 gpsdata = fourCC.GPSData._make(retdata)
+                if not last_gpsdata:
+                    last_gpsdata = gpsdata
+                if abs(last_gpsdata.lat - gpsdata.lat) > 1 or abs(last_gpsdata.lon - gpsdata.lon) > 1:
+                    stats["badlatlon"] += 1
+                    goproovl.print_log(f"Warning: lat - lon error.  last_gpsdata.lat: {last_gpsdata.lat}, gpsdata.lat: {gpsdata.lat}, last_gpsdata.lon: {last_gpsdata.lon}, gpsdata.lon: {gpsdata.lon}")
+                    continue
+
                 if gpsdata.speed > 35:
                     stats["badspeep"] += 1
                     goproovl.print_log(f"Warning: Skipping point due to speed {gpsdata.speed} > 35 m/s")
