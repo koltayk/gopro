@@ -13,7 +13,7 @@ import time
 
 class GPSPoint:
 
-    def __init__(self, latitude = 0.0, longitude = 0.0, elevation = 0.0, time = datetime.fromtimestamp(time.time()), speed = 0.0, temperature = 0.0, dop = 9999):
+    def __init__(self, latitude = 0.0, longitude = 0.0, elevation = 0.0, time = datetime.fromtimestamp(time.time()), speed = 0.0, temperature = 0.0, dop = 9999, baro_alt = 0):
         self.latitude = latitude
         self.longitude = longitude
         self.elevation = elevation
@@ -25,6 +25,7 @@ class GPSPoint:
         self.cadence = 0
         self.temperature = temperature
         self.dop = dop
+        self.baro_alt = baro_alt
         self.atemp = 0
         self.power = 0
         self.distance = 0

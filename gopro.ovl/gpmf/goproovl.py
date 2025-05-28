@@ -19,16 +19,18 @@ import json
 import math
 import os
 from pathlib import Path
-import re
 import shutil
 from subprocess import Popen, PIPE
+import traceback
 
 from PIL import Image, ImageDraw, ImageFont  # @UnresolvedImport only for PyDev
+from geopy.distance import geodesic
 import pytz
 from tzwhere import tzwhere  # https://github.com/pegler/pytzwhere/issues/53
 
 from gopro2gpx import gopro2gpx
 from gopro2gpx import gpshelper
+from gpmf import subtitlefromigc
 import numpy as np
 
 FFMPEG = "/usr/bin/ffmpeg"
@@ -50,16 +52,20 @@ YCbCr Matrix: None
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: White1t, Arial,5, &H00FFFFFF, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,5,1,1,1,1
 Style: White2t, Arial,5, &H00FFFFFF, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,5,1,1,6,1
-Style: White3t, Arial,5, &H00FFFFFF, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,5,1,1,11,1
+Style: White3t, Arial,5, &H00FFFF00, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,5,1,1,11,1
+Style: White4t, Arial,5, &H00FFFF00, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,5,1,1,16,1
 Style: Black1t, Arial,5, &H00000000, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,5,1,1,1,1
 Style: Black2t, Arial,5, &H00000000, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,5,1,1,6,1
-Style: Black3t, Arial,5, &H00000000, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,5,1,1,11,1
+Style: Black3t, Arial,5, &H00FF0000, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,5,1,1,11,1
+Style: Black4t, Arial,5, &H00FF0000, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,5,1,1,16,1
 Style: White1b, Arial,5, &H00FFFFFF, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,1,1,1,1,1
 Style: White2b, Arial,5, &H00FFFFFF, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,1,1,1,6,1
-Style: White3b, Arial,5, &H00FFFFFF, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,1,1,1,11,1
+Style: White3b, Arial,5, &H00FFFF00, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,1,1,1,11,1
+Style: White4b, Arial,5, &H00FFFF00, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,1,1,1,16,1
 Style: Black1b, Arial,5, &H00000000, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,1,1,1,1,1
 Style: Black2b, Arial,5, &H00000000, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,1,1,1,6,1
-Style: Black3b, Arial,5, &H00000000, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,1,1,1,11,1
+Style: Black3b, Arial,5, &H00FF0000, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,1,1,1,11,1
+Style: Black4b, Arial,5, &H00FF0000, &H000000FF, &H00000000, &H80000000,-1,0,0,0,100,100,0,0,0,0,0,1,1,1,16,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"""
@@ -73,17 +79,31 @@ def time_in_sec(min_sec):
     return seconds
 
 
-def dump_metadata():
+def get_metadata(video):
     global duration_sec
-    global ovl_pos_y
-    global width
-    params = [FFPROBE, '-i', concat_video, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', '-hide_banner']
+    params = [FFPROBE, '-i', video, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', '-hide_banner']
     print_log(" ".join(params))
     (o, e) = Popen(params, stdout = PIPE, stderr = PIPE).communicate()
-    print_log(f"Read metadata from {concat_video}")
+    print_log(f"Read metadata from {video}")
     metadata = json.loads(o)
-    duration_sec = float(metadata['format']['duration'])
-    print(f"Length of file is: {duration_sec} sec")
+    duration_sec_float = float(metadata['format']['duration'])
+    print_log(f"Length of file is: {duration_sec_float} sec")
+    duration_sec = math.floor(duration_sec_float)
+    return metadata, duration_sec
+
+
+def get_corner(video, img_pos_x, img_pos_y):
+    params = [FFMPEG, '-threads', '16', '-i', video, '-vf', f'fps=1,crop={ovl_size[0]}:{ovl_size[1]}:{img_pos_x}:{img_pos_y}', text_corner_dir + '/%05d.png', '-hide_banner']
+    rc = call_prog(params)
+    print_log(f"Read frames pro second from {video} to {text_corner_dir} returncode: {rc}")
+    if rc != 0:
+        exit()
+
+
+def dump_metadata():
+    global ovl_pos_y
+    global width
+    metadata, duration_sec = get_metadata(concat_video)
     width = metadata['streams'][0]['width']
     height = metadata['streams'][0]['height']
     if args.upovl:
@@ -103,11 +123,7 @@ def dump_metadata():
             img_pos_x = 0
             img_pos_y = height - ovl_size[1]
 
-    params = [FFMPEG, '-threads', '16', '-i', concat_video, '-vf', f'fps=1,crop={ovl_size[0]}:{ovl_size[1]}:{img_pos_x}:{img_pos_y}', text_corner_dir + '/%05d.png', '-hide_banner']
-    rc = call_prog(params)
-    print_log(f"Read frames pro second from {concat_video} to {text_corner_dir} returncode: {rc}")
-    if rc != 0:
-        exit()
+    get_corner(concat_video, img_pos_x, img_pos_y)
 
     params = [FFMPEG, '-threads', '16', '-y', '-i', concat_video, '-codec', 'copy', '-map', '0:2', '-f', 'rawvideo', '-']
     print_log(" ".join(params))
@@ -119,61 +135,71 @@ def dump_metadata():
 
 
 def calc_vertical_speed(step, alt0, alt1):
-    return (alt1 - alt0) / step
+    if step and alt0 and alt1:
+        return (alt1 - alt0) / step
+    else:
+        return None
 
 
-def calc_direction_ift(gps_datum_prev, gps_datum_next, text0, text1):
-    direction = angle_from_coordinate(gps_datum_prev.latitude, gps_datum_prev.longitude, gps_datum_next.latitude, gps_datum_next.longitude)
-    diff_sec = (gps_datum_next.time - gps_datum_prev.time).total_seconds()
-    vertical_speed = calc_vertical_speed(diff_sec, gps_datum_prev.elevation, gps_datum_next.elevation)
-    text0 += f'   {direction:.0f} °'
-    text1 += f'   {vertical_speed:.1f} m/s'
+def get_lat_lon(gps_point):
+    lat = gps_point.latitude
+    lon = gps_point.longitude
+    return (lat, lon)
+
+
+def calc_speed(diff_sec, gps_datum_prev, gps_datum_next):
+    dist_m = geodesic(get_lat_lon(gps_datum_prev), get_lat_lon(gps_datum_next)).meters
+    speed = 3.6 * dist_m / diff_sec
+    return speed
+
+
+def calc_direction_ift(gps_datum_prev, gps_datum):
+    direction = angle_from_coordinate(gps_datum_prev.latitude, gps_datum_prev.longitude, gps_datum.latitude, gps_datum.longitude)
+    diff_sec = (gps_datum.time - gps_datum_prev.time).total_seconds()
+    if diff_sec:
+        speed_gps = 3.6 * gps_datum.speed if gps_datum.speed else calc_speed(diff_sec, gps_datum_prev, gps_datum)
+        text0 = f'{gps_datum.elevation:.0f} m   {speed_gps:.0f} km/h   {direction:.0f} °'
+    else:
+        text0 = ''
+    vertical_speed_baro = calc_vertical_speed(diff_sec, gps_datum_prev.baro_alt, gps_datum.baro_alt)
+    if  vertical_speed_baro:
+        text1 = f'{gps_datum.baro_alt:.0f} m   {vertical_speed_baro:.1f} m/s'
+    else:
+        text1 = ''
     return text0, text1
 
 
-def create_subtitle_text(gps_points, start_time, act_sec, sfd):
+def create_subtitle_text(gps_points, local_start_time, act_sec, sfd):
     colorText = get_text_color(act_sec)
-    gps_datum_prev = None if act_sec == 0 else gps_points[act_sec - 1]
+    delta = 5
+    gps_datum_prev = gps_points[max(0, act_sec - delta)]
     gps_datum = gps_points[act_sec]
-    gps_datum_next = None if act_sec + 1 == len(gps_points) else gps_points[act_sec + 1]
-    time = start_time + datetime.timedelta(seconds = act_sec)
-    if gps_datum and gps_datum.latitude:
-        speed = 3.6 * gps_datum.speed
-        heigh = gps_datum.elevation
-        text0 = f'{speed:.0f} km/h'
-        text1 = f'{heigh:.0f} m'
-        if gps_datum_prev and gps_datum_prev.latitude and gps_datum_next and gps_datum_next.latitude:
-            text0, text1 = calc_direction_ift(gps_datum_prev, gps_datum_next, text0, text1)
-        elif gps_datum_prev and gps_datum_prev.latitude:
-            text0, text1 = calc_direction_ift(gps_datum_prev, gps_datum, text0, text1)
-        elif gps_datum_next and gps_datum_next.latitude:
-            text0, text1 = calc_direction_ift(gps_datum, gps_datum_next, text0, text1)
+    # gps_datum_next = gps_points[min(len(gps_points) - 1, act_sec + delta)]
+    time = local_start_time + datetime.timedelta(seconds = act_sec)
+    if gps_datum and gps_datum.latitude and gps_datum_prev and gps_datum_prev.latitude:
+        text0, text1 = calc_direction_ift(gps_datum_prev, gps_datum)
     else:
         text0 = ''
         text1 = ''
-    if timezone:
-        time_str = timezone.fromutc(time).strftime("%Y.%m.%d %H:%M:%S")
-    else:
-        time_str = time.strftime("%Y.%m.%d %H:%M:%S")
+        print_log(f"act_sec: {act_sec} gps_datum: {gps_datum} gps_datum_prev: {gps_datum_prev}")
+    time_str = time.strftime("%Y.%m.%d %H:%M:%S")
     ts0 = datetime.timedelta(seconds = act_sec)
     ts1 = datetime.timedelta(seconds = act_sec + 1)
     if args.upovl:
-        line_nr = '1t'
         # print(f'Dialogue: 0,{ts0}.00,{ts1}.00.00,{colorText}{line_nr},,0000,0000,0000,,{time_str}\\n{text0}\\n{text1}', file = sfd)
-        print(f'Dialogue: 0,{ts0}.00,{ts1}.00.00,{colorText}{line_nr},,0000,0000,0000,,{time_str}', file = sfd)
+        write_subtitle_line(ts0, ts1, colorText, '1t', time_str, sfd)
         if text0:
-            line_nr = '2t'
-            print(f'Dialogue: 0,{ts0}.00,{ts1}.00,{colorText}{line_nr},,0000,0000,0000,,{text0}', file = sfd)
-            line_nr = '3t'
-            print(f'Dialogue: 0,{ts0}.00,{ts1}.00,{colorText}{line_nr},,0000,0000,0000,,{text1}', file = sfd)
+            write_subtitle_line(ts0, ts1, colorText, '2t', text0, sfd)
+            write_subtitle_line(ts0, ts1, colorText, '3t', text1, sfd)
     else:
-        line_nr = '3b'
-        print(f'Dialogue: 0,{ts0}.00,{ts1}.00,{colorText}{line_nr},,0000,0000,0000,,{time_str}', file = sfd)
+        write_subtitle_line(ts0, ts1, colorText, '3b', time_str, sfd)
         if text0:
-            line_nr = '1b'
-            print(f'Dialogue: 0,{ts0}.00,{ts1}.00,{colorText}{line_nr},,0000,0000,0000,,{text0}', file = sfd)
-            line_nr = '2b'
-            print(f'Dialogue: 0,{ts0}.00,{ts1}.00,{colorText}{line_nr},,0000,0000,0000,,{text1}', file = sfd)
+            write_subtitle_line(ts0, ts1, colorText, '1b', text0, sfd)
+            write_subtitle_line(ts0, ts1, colorText, '2b', text1, sfd)
+
+
+def write_subtitle_line(ts0, ts1, colorText, line_nr, text, sfd):
+    print(f'Dialogue: 0,{ts0}.00,{ts1}.00,{colorText}{line_nr},,0000,0000,0000,,{text}', file = sfd)
 
 
 def angle_from_coordinate(lat1, long1, lat2, long2):
@@ -223,26 +249,42 @@ def call_prog(params):
     return rc
 
 
-def create_subtitles(points, start_time):
+def create_subtitles(points, start_time_gps_rounded):
+    start_time_gps = points[0].time
+    igc_points = subtitlefromigc.get_igc_points(start_time_gps_rounded.strftime("%Y.%m.%d %H:%M:%S"))
+    if igc_points:
+        start_time_igc = igc_points[0].time
+        subtitle_igc_diff_sec = int((start_time_gps_rounded - start_time_igc).total_seconds())
+        if subtitle_igc_diff_sec < 0:
+            points = subtitlefromigc.before_points(igc_points, -subtitle_igc_diff_sec)
+        else:
+            points = igc_points[subtitle_igc_diff_sec:]
+    else:
+        diff_gps_time = start_time_gps - start_time_gps_rounded  # nem negatív
+        points = subtitlefromigc.before_points(points, diff_gps_time.total_seconds())
     p_index = 0
     gps_points = []
     true_gps_points = []
-    curr_time_rounded = start_time
-    for act_sec in range(round(duration_sec)):
-        p_index, dist_sec_last = get_nearest_gps_datum(points, p_index, curr_time_rounded)
-        point = points[p_index]
-        if dist_sec_last > 0.5:
-            point = None
-        else:
-            true_gps_points.append(point)
-        gps_points.append(point)
-        print(f"{act_sec} {curr_time_rounded} {p_index} {points[p_index].time}")
-        curr_time_rounded = curr_time_rounded + datetime.timedelta(seconds = 1)
+    curr_time_rounded = start_time_gps_rounded
     with open(subtitle_file, "w") as sfd:
+        local_start_time = timezone.fromutc(start_time_gps_rounded)
         print(SUBTITLES_PREF, file = sfd)
-        for act_sec in range(len(gps_points)):
-            create_subtitle_text(gps_points, start_time, act_sec, sfd)
-    return gps_points, true_gps_points
+        for act_sec in range(duration_sec):
+            p_index, dist_sec_last = get_nearest_gps_datum(points, p_index, curr_time_rounded)
+            point = points[p_index]
+            # if igc_points:
+            #     point.baro_alt = igc_points[act_sec].baro_alt
+            if dist_sec_last < 0.5:
+                true_gps_points.append(point)
+            else:
+                point = None
+                print_log(f"dist_sec_last: {dist_sec_last} curr_time_rounded: {curr_time_rounded} p_index: {p_index}")
+            # if point or p_index < len(points) - 1:
+            gps_points.append(point)
+            print(f"{act_sec} {curr_time_rounded} {p_index} {points[p_index].time}")
+            curr_time_rounded = curr_time_rounded + datetime.timedelta(seconds = 1)
+            create_subtitle_text(gps_points, local_start_time, act_sec, sfd)
+    return gps_points, true_gps_points, igc_points
 
 
 def add_subtitles(inp_video):
@@ -301,7 +343,7 @@ def create_ovl_video(img_width):
 
 
 def print_log(param):
-    string = str(datetime.datetime.now()) + " " + param.replace("\n", "")
+    string = str(datetime.datetime.now()) + " " + param  # .replace("\n", "")
     print(string)
     print(string, file = lfd, flush = True)
 
@@ -405,7 +447,7 @@ def cut(rotate, begin, end, index, video_file_name):
     return out_video_part_ts
 
 
-def get_local_time(points):
+def get_local_time(points, start_time_gps):
     global lon_factor
     timezone = None
     start_time_local_rounded = None
@@ -419,7 +461,7 @@ def get_local_time(points):
         if not lon_factor:
             lon_factor = math.cos(math.radians(point.latitude))
     if timezone:
-        local_time = timezone.fromutc(start_time)
+        local_time = timezone.fromutc(start_time_gps)
         start_time_local_rounded = datetime.datetime.fromtimestamp(round(local_time.timestamp()))
     return timezone, start_time_local_rounded
 
@@ -462,9 +504,9 @@ def create_elevation_niveau_lines(min_hight, max_hight, elev_img_size, buffer):
 
 def calc_lines(min_hight, max_hight, step, elev_img_size, buffer):
     lines = list()
-    min = math.floor(min_hight / step)
-    max = math.ceil(max_hight / step)
-    for niveau in range(min, max):
+    min_img = math.floor(min_hight / step)
+    max_img = math.ceil(max_hight / step)
+    for niveau in range(min_img, max_img):
         hight = calc_y(niveau, min_hight, max_hight, step, elev_img_size, buffer)
         if 0 <= hight <= elev_img_size[1]:
             line_dict = {}
@@ -479,7 +521,16 @@ def calc_y(hight, min_hight, max_hight, step, elev_img_size, buffer):
     return buffer + (elev_img_size[1] - 2 * buffer) * (max_hight - hight * step) / (max_hight - min_hight)
 
 
-def add_images(points, valid_points):
+def add_elevation_point(elevation_line, act_sec, points, value, min_hight, max_hight, elev_img_size, buffer):
+    if value:
+        elevation_point = (buffer + (elev_img_size[0] - 2 * buffer) * act_sec / len(points), buffer + (elev_img_size[1] - 2 * buffer) * (max_hight - value) / (max_hight - min_hight))
+        elevation_line.append(elevation_point)
+        return elevation_point
+    else:
+        return None
+
+
+def create_images(points, valid_points):
     elev_img_size = (280, 120)
     max_track_img_size = 250
     buffer = 5
@@ -487,28 +538,37 @@ def add_images(points, valid_points):
     fontsize = 8
     fnt = ImageFont.truetype(fontname, fontsize)
 
-    elevation_line = list()
-    track_line = list()
     min_hight = min(p.elevation for p in valid_points)
     max_hight = max(p.elevation for p in valid_points)
     min_lat = min(p.latitude for p in valid_points)
     max_lat = max(p.latitude for p in valid_points)
     min_lon = min(p.longitude for p in valid_points)
     max_lon = max(p.longitude for p in valid_points)
+    elevation_line = list()
+    baro_elevation_line = None
+    if igc_points:
+        baro_elevation_line = list()
+        valid_baro_alts = filter(lambda x: x is not None, [p.baro_alt for p in valid_points])
+        list_valid_baro_alts = list(valid_baro_alts)
+        if list_valid_baro_alts:
+            min_hight = min(min(list_valid_baro_alts), min_hight)
+            max_hight = max(max(list_valid_baro_alts), max_hight)
+    track_line = list()
     track_img_size = calc_track_img_size(min_lat, max_lat, min_lon, max_lon, max_track_img_size, buffer)
     img_size = (elev_img_size[0] + track_img_size[0], max(elev_img_size[1], track_img_size[1]))
     img_points = list()
     for act_sec, point in enumerate(points):
-        elevation_point = None
         track_point = None
+        baro_elevation_point = None
         if point:
             if max_hight > min_hight:
-                elevation_point = (buffer + (elev_img_size[0] - 2 * buffer) * act_sec / len(points), buffer + (elev_img_size[1] - 2 * buffer) * (max_hight - point.elevation) / (max_hight - min_hight))
-                elevation_line.append(elevation_point)
+                elevation_point = add_elevation_point(elevation_line, act_sec, points, point.elevation, min_hight, max_hight, elev_img_size, buffer)
+                if igc_points:
+                    baro_elevation_point = add_elevation_point(baro_elevation_line, act_sec, points, point.baro_alt, min_hight, max_hight, elev_img_size, buffer)
                 lat, lon = create_track_point(point, min_lat, max_lat, min_lon, max_lon)
                 track_point = (elev_img_size[0] + buffer + (track_img_size[0] - 2 * buffer) * lon, buffer + (track_img_size[1] - 2 * buffer) * lat)
                 track_line.append(track_point)
-        img_points.append((elevation_point, track_point))
+                img_points.append((elevation_point, baro_elevation_point, track_point))
     lines, step, main_step = create_elevation_niveau_lines(min_hight, max_hight, elev_img_size, buffer)
     img = Image.new('RGBA', img_size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -519,15 +579,19 @@ def add_images(points, valid_points):
         draw.text((0, line_dict["hight"] - 5), str(int(line_dict["niveau"] * step)), font = fnt, fill = (55, 55, 55))
     if elevation_line:
         draw.line(elevation_line, fill = (255, 255, 0), width = 1)
+    if baro_elevation_line:
+        draw.line(baro_elevation_line, fill = (0, 255, 255), width = 1)
     draw.rectangle([(elev_img_size[0], 0), (img_size[0], track_img_size[1])], fill = (0, 0, 0, 50), outline = (0, 0, 0, 100), width = 1)
     draw.line(track_line, fill = (255, 255, 128), width = 1)
     # img.show()
     img.save(base_img)
-    for act_sec, (elevation_point, track_point) in enumerate(img_points):
+    for act_sec, (elevation_point, baro_elevation_point, track_point) in enumerate(img_points):
         img = Image.new('RGBA', img_size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         if elevation_point:
             draw.ellipse(((elevation_point[0] - 2, elevation_point[1] - 2), (elevation_point[0] + 2, elevation_point[1] + 2)), fill = (255, 0, 0), width = 4)
+        if baro_elevation_point:
+            draw.ellipse(((baro_elevation_point[0] - 2, baro_elevation_point[1] - 2), (baro_elevation_point[0] + 2, baro_elevation_point[1] + 2)), fill = (255, 0, 0), width = 4)
         if track_point:
             draw.ellipse(((track_point[0] - 2, track_point[1] - 2), (track_point[0] + 2, track_point[1] + 2)), fill = (255, 0, 0), width = 4)
         # img.show()
@@ -578,45 +642,66 @@ if __name__ == "__main__":
     concat_video = f'{out_file_base}/concat.{MP4}'
     ovl_video = f'{out_file_base_tmp}/ovl.{MP4}'
     gpmf_file = f'{out_file_base}/gpmf.bin'
+    # base_dir_igc = f'/home/kk/gipsy/Koltay Károly'
     with open(log_file, "w+") as lfd:
-        print_log(f"begin {args.begin}, end {args.end}")
-        if os.path.exists(out_file_base):
-            shutil.rmtree(out_file_base_tmp)
-        os.makedirs(text_corner_dir, exist_ok = True)
-        os.makedirs(img_dir, exist_ok = True)
+        try:
+            print_log(f"begin {args.begin}, end {args.end}")
+            if os.path.exists(out_file_base):
+                shutil.rmtree(out_file_base_tmp)
+            os.makedirs(text_corner_dir, exist_ok = True)
+            os.makedirs(img_dir, exist_ok = True)
+# 1. concat all parts
+            inp_video_files = sorted(glob.glob(f'{args.dir}/*.MP4'))
+            video_parts_inp = prepare_concat(args, inp_video_files)
+            print_log(f"concat_video begin: {concat_video}")
+            concat_video_files(video_parts_inp, concat_video)
+            print_log(f"concat_video end: {concat_video}")
+# 2. create gps points from concatenated video
+            points, start_time = gopro2gpx.main_core(dump_metadata(), concat_video, out_file_base, lfd)
+            print_log(f"gopro2gpx.main_core() end")
+            if points:
+# 3. create subtitles
+                start_time_gps_rounded = datetime.datetime.fromtimestamp(round(start_time.timestamp()))
+                timezone, start_time_local_rounded = get_local_time(points, start_time)
+                base_local_time = start_time_local_rounded if start_time_local_rounded else start_time_gps_rounded
+                base_local_time_str = base_local_time.strftime("%Y.%m.%d %H:%M:%S")
+                base_name = f'{base_local_time_str}_{args.outputname}'
+                # base_name = '2022.03.27 10:28:52_Sorica'  ####################################################
+                subtitle_file = f'{out_file_base}/{base_name}_subtitle.ass'
+                gps_points, true_gps_points, igc_points = create_subtitles(points, start_time_gps_rounded)
+                print_log(f"gps_points: {len(gps_points)}")
+# 4. create gpx file
+                gpx = gpshelper.generate_GPX(true_gps_points, trk_name = base_name)
+                with open(f"{out_file_base}/gpmf.gpx", "w") as fd:
+                    fd.write(gpx)
+                print_log(f"gpx file {out_file_base}/gpmf.gpx written")
+# 5. create images of elevation diagram, track plot and positions pro second
+                img_width = create_images(gps_points, true_gps_points)
+                print_log(f"images created")
+# 6. create overlay of concatenated video and images
+                # width = 1920  ##############################################################
+                # img_width = 530  ##############################################################
+                create_ovl_video(img_width)
+                print_log(f"overlay video created")
+# 7. add subtitles to overlay video
+                # base_name = '2025.04.30 11:19:44_Hohe_Wand'  ##############################################################
+                # subtitle_file = f'{out_file_base}/{base_name}_subtitle.ass' ##############################################################
+                add_subtitles(ovl_video)
+                print_log(f"subtitles added")
 
-        inp_video_files = sorted(glob.glob(f'{args.dir}/*.MP4'))
-        video_parts_inp = prepare_concat(args, inp_video_files)
-        concat_video_files(video_parts_inp, concat_video)
-
-        points, start_time = gopro2gpx.main_core(dump_metadata(), concat_video, out_file_base, lfd)
-#         points = True  ####################################################
-        if points:
-            start_time_rounded = datetime.datetime.fromtimestamp(round(start_time.timestamp()))
-            timezone, start_time_local_rounded = get_local_time(points)
-            base_name_time = start_time_local_rounded if start_time_local_rounded else start_time_rounded
-            base_name = f'{base_name_time.strftime("%Y.%m.%d %H:%M:%S")}_{args.outputname}'
-            # base_name = '2022.03.27 10:28:52_Sorica'  ####################################################
-            subtitle_file = f'{out_file_base}/{base_name}_subtitle.ass'
-            gps_points, true_gps_points = create_subtitles(points, start_time_rounded)
-            print_log(f"gps_points: {len(gps_points)}")
-            gpx = gpshelper.generate_GPX(true_gps_points, start_time, trk_name = base_name)
-            with open(f"{out_file_base}/gpmf.gpx", "w") as fd:
-                fd.write(gpx)
-            img_width = add_images(gps_points, true_gps_points)
-            create_ovl_video(img_width)
-            add_subtitles(ovl_video)
-            new_dir = f'{args.outdir}ovl/{base_name}'
-            shutil.rmtree(f'{new_dir}', ignore_errors = True)
-            shutil.move(out_file_base, new_dir)
-            shutil.move(f'{new_dir}/concat.{MP4}', f'{new_dir}/{base_name}_concat.{MP4}')
-            shutil.move(f'{new_dir}/gpmf.klv', f'{new_dir}/{base_name}_gpmf.klv')
-            shutil.move(f'{new_dir}/gpmf.kml', f'{new_dir}/{base_name}.kml')
-            shutil.move(f'{new_dir}/gpmf.gpx', f'{new_dir}/{base_name}.gpx')
-            shutil.move(f'{new_dir}/gpmf.bin', f'{new_dir}/{base_name}_gpmf.bin')
-            shutil.rmtree(f'{new_dir}/tmp')
+                new_dir = f'{args.outdir}ovl/{base_name}'
+                shutil.rmtree(f'{new_dir}', ignore_errors = True)
+                shutil.move(out_file_base, new_dir)
+                shutil.move(f'{new_dir}/concat.{MP4}', f'{new_dir}/{base_name}_concat.{MP4}')
+                shutil.move(f'{new_dir}/gpmf.klv', f'{new_dir}/{base_name}_gpmf.klv')
+                shutil.move(f'{new_dir}/gpmf.kml', f'{new_dir}/{base_name}.kml')
+                shutil.move(f'{new_dir}/gpmf.gpx', f'{new_dir}/{base_name}.gpx')
+                shutil.move(f'{new_dir}/gpmf.bin', f'{new_dir}/{base_name}_gpmf.bin')
+                shutil.rmtree(f'{new_dir}/tmp')
+        except Exception as e:
+            tb_str = ''.join(traceback.format_exception(e))
+            print_log(tb_str)
 
         dur = datetime.datetime.now()
         process_duration = str(dur - start)
         print_log(f"process duration: {process_duration}")
-
